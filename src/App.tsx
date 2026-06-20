@@ -496,47 +496,7 @@ export default function App() {
             <h1 className="text-lg font-black tracking-tight flex items-center gap-1.5">
               SOLVIORA <span className="text-xs font-black uppercase text-indigo-500 bg-indigo-500/10 px-2 py-0.5 rounded tracking-wider">AI</span>
             </h1>
-            <p className={`text-[10px] font-bold uppercase tracking-widest mt-0.5 ${
-              isDark ? "text-slate-400" : "text-slate-500"
-            }`}>
-              Illuminate Solutions. Simplify Possibilities.
-            </p>
           </div>
-        </div>
-
-        {/* Global Controls & Theme Switcher */}
-        <div className="flex items-center gap-3 flex-wrap" id="header-controls">
-          <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-bold tracking-widest uppercase border ${
-            isDark 
-              ? "bg-emerald-950/40 border-emerald-800 text-emerald-400" 
-              : "bg-emerald-50 border-emerald-200 text-emerald-700"
-          }`}>
-            <span className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></span>
-            <span>AI GATEWAY ONLINE</span>
-          </div>
-
-          {/* Core framework specification */}
-          <div className={`hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-bold tracking-widest uppercase font-mono border ${
-            isDark 
-              ? "bg-slate-800 border-slate-700 text-indigo-300" 
-              : "bg-slate-100 border-slate-200 text-indigo-700"
-          }`}>
-            <Cpu className="w-3.5 h-3.5" />
-            <span>Gemini 3.5 Flash</span>
-          </div>
-
-          <button
-            onClick={() => setIsDark(!isDark)}
-            className={`p-2.5 rounded-xl border transition-all duration-300 cursor-pointer ${
-              isDark 
-                ? "bg-slate-800 border-slate-700 text-slate-300 hover:text-white hover:bg-slate-750" 
-                : "bg-white border-slate-200 text-slate-600 hover:text-slate-900 hover:bg-slate-100"
-            }`}
-            title="Toggle theme view"
-            id="toggle-dark-mode-btn"
-          >
-            {isDark ? <Sun className="w-4 h-4 text-amber-400 animate-spin" style={{ animationDuration: '6s' }} /> : <Moon className="w-4 h-4 text-indigo-600" />}
-          </button>
         </div>
       </header>
 
