@@ -463,17 +463,19 @@ export default function CameraScanner({
     const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
     
     let attempt = 0;
-    const maxRetries = 2; // Retry up to 2 times (3 total attempts)
-    let finalResponse: Response | null = null;
-    let fallbackText: string | null = null;
-    let customFriendlyMsg: string | null = null;
+    const maxRetries = 3; // Maximum retries = 3
     let lastErr: any = null;
+    let finalSuccess = false;
+    let fallbackText = "";
 
     while (attempt <= maxRetries) {
       try {
         if (attempt > 0) {
-          console.warn(`[OCR Retry System] Resubmitting request (Attempt ${attempt + 1}/${maxRetries + 1}) in 2 seconds...`);
-          await sleep(2000); // 2-second delay between retries
+          // Increase delay exponentially (1s -> 2s -> 4s)
+          // Since attempt is 1, 2, 3: Delay = 1000 * 2^(attempt - 1)
+          const delayMs = 1000 * Math.pow(2, attempt - 1);
+          console.warn(`[OCR Retry System] Retrying in ${delayMs}ms... (Attempt ${attempt}/${maxRetries})`);
+          await sleep(delayMs);
         }
 
         const response = await fetch("/api/ocr", {
@@ -499,151 +501,133 @@ export default function CameraScanner({
         console.info(`[HTTP Attempt ${attempt + 1}] Content-Type Header: ${contentType}`);
         console.info(`[HTTP Attempt ${attempt + 1}] Response Headers:`, responseHeaders);
 
-        // Verification step 1: Check response.ok before parsing
-        if (!response.ok) {
-          // If response is HTML or any non-JSON format, do not call response.json()
-          if (!contentType.includes("application/json")) {
-            const rawBody = await response.text().catch(() => "");
-            fallbackText = rawBody;
-            console.error(`[Silent Tech Logger] Non-JSON error body (HTTP ${response.status}):`, rawBody.substring(0, 500));
-          } else {
-            const errPayload = await response.json().catch(() => ({}));
-            fallbackText = JSON.stringify(errPayload);
-            console.error(`[Silent Tech Logger] JSON error payload (HTTP ${response.status}):`, errPayload);
-            if (errPayload.error) {
-              throw new Error(errPayload.error);
+        const responseBodyText = await response.text().catch(() => "");
+        console.info(`[HTTP Payload] Body Length: ${responseBodyText.length} characters`);
+        fallbackText = responseBodyText;
+
+        let data: any;
+        try {
+          data = JSON.parse(responseBodyText);
+        } catch (e) {
+          data = {
+            status: "error",
+            error: {
+              type: "INVALID_INPUT",
+              message: "Model returned non-JSON response"
+            },
+            data: {
+              extracted_text: "",
+              problem_type: "unknown",
+              confidence: 0
+            },
+            retry: {
+              enabled: true,
+              attempts: attempt,
+              max_attempts: maxRetries,
+              delay_ms: 1000
             }
-          }
-
-          // Classify friendly user errors depending on HTTP Code
-          if (response.status === 400) {
-            customFriendlyMsg = "⚠️ The OCR service received an invalid request format. Please try again.";
-          } else if (response.status === 401) {
-            customFriendlyMsg = "⚠️ Unauthorized access to the OCR service. Contact administration.";
-          } else if (response.status === 403) {
-            customFriendlyMsg = "⚠️ Forbidden request. Your access is restricted.";
-          } else if (response.status === 404) {
-            customFriendlyMsg = "⚠️ The OCR service endpoint was not found on the server.";
-          } else if (response.status === 429) {
-            customFriendlyMsg = "⚠️ OCR rate limiting exceeded. Please wait a moment and try again.";
-          } else if (response.status >= 500) {
-            customFriendlyMsg = "⚠️ The server encountered an internal error. Please try again.";
-          } else {
-            customFriendlyMsg = `⚠️ The OCR service returned an unexpected response (Error ${response.status}).`;
-          }
-
-          throw new Error(customFriendlyMsg);
+          };
         }
 
-        // Verification step 2: Verify that Content-Type contains "application/json"
-        if (!contentType.includes("application/json")) {
-          const rawText = await response.text().catch(() => "");
-          fallbackText = rawText;
-          console.error(`[Silent Tech Logger] Non-JSON response received on success route (HTTP ${response.status}):`, rawText.substring(0, 500));
-          throw new Error("⚠️ The OCR service responded with an invalid format. Please try again.");
-        }
-
-        // Successfully received and verified json response
-        finalResponse = response;
-        break;
-
-      } catch (err: any) {
-        lastErr = err;
-        console.warn(`[OCR Retry System] Attempt ${attempt + 1}/${maxRetries + 1} failed:`, err.message || err);
-        attempt++;
-      }
-    }
-
-    // Process final outcome
-    if (finalResponse) {
-      try {
-        const responseBodyText = await finalResponse.clone().text().catch(() => "");
-        console.info(`[HTTP Success Payload] Body Length: ${responseBodyText.length} characters`);
-        console.info(`[HTTP Success Payload] Body Sample:`, responseBodyText.substring(0, 500));
-
-        const data = await finalResponse.json();
-        if (data.success) {
-          // Check for empty text extraction and classify potential failures gracefully
-          if (!data.extractedText || !data.extractedText.trim()) {
-            let triageMsg = "⚠️ OCR succeeded but extracted text is empty.\n";
-            triageMsg += "Potential Causes:\n";
-            triageMsg += "- The cropped image area does not contain readable letters/numbers.\n";
-            triageMsg += "- The photo is too blurry or low-contrast.\n";
-            triageMsg += "- Empty image uploaded or wrong crop/export coordinates.\n";
-            triageMsg += "- AI provider returned empty text under high load.";
-            throw new Error(triageMsg);
+        // Handle success status
+        if (data.status === "success") {
+          const extractedText = data.data?.extracted_text || "";
+          
+          if (!extractedText.trim()) {
+            throw new Error("OCR returned empty text: The text was completely unreadable, blurry, low-contrast, or contained no recognizable mathematical characters.");
           }
 
-          setExtractedResult(data.extractedText || "");
+          // Success payload processing
+          setExtractedResult(extractedText);
           
-          // Calculate deterministic score percent inside range targets based on text
-          const textLen = (data.extractedText || "").length;
-          const offset = textLen % 5; // offset 0-4 for dynamism
+          const confidenceVal = typeof data.data?.confidence === "number" ? data.data.confidence : 0.95;
+          const scorePercent = Math.max(10, Math.min(99, Math.round(confidenceVal * 100)));
           
-          let initialPercent = 94 + offset; // default high
-          if (data.confidence === "low") {
-            initialPercent = 42 + offset;
-          } else if (data.confidence === "medium") {
-            initialPercent = 75 + offset;
-          }
-
-          // Clip maximum levels to 99%
-          const score = Math.max(10, Math.min(99, initialPercent));
+          setOcrConfidencePercent(scorePercent);
+          setOcrConfidence(confidenceVal >= 0.70 ? "high" : "low");
+          setOcrConfidenceReason(data.error?.message || "Multimodal OCR pattern compiled successfully.");
           
-          setOcrConfidence(data.confidence);
-          setOcrConfidencePercent(score);
-          setOcrConfidenceReason(data.confidenceReason || "Multimodal OCR pattern compiled successfully.");
-          setIsQuestion(data.isQuestion !== false);
+          const isMathOrText = data.data?.problem_type === "math" || data.data?.problem_type === "text";
+          setIsQuestion(isMathOrText);
 
           // Store to scan history automatically
           saveScanToHistory({
             id: Date.now().toString(),
             imagePreview: imageB64,
-            extractedText: data.extractedText || "",
-            confidence: data.confidence || "high",
+            extractedText,
+            confidence: confidenceVal >= 0.70 ? "high" : "low",
             timestamp: Date.now(),
           });
-        } else {
-          throw new Error(data.error || "Failed to extract clean readable question.");
+
+          finalSuccess = true;
+          break; // Break loop since we succeeded!
         }
-      } catch (parseErr: any) {
-        console.error("[Silent Tech Logger] Success payload processing failed:", parseErr);
-        setOcrError(parseErr.message || "⚠️ The OCR service is temporarily unavailable. Please try again.");
-        setTechnicalErrorDetails(parseErr.stack || parseErr.toString());
-      } finally {
-        setIsOcrProcessing(false);
+
+        // Handle error status inside response
+        if (data.status === "error") {
+          const errType = data.error?.type;
+          const errMsg = data.error?.message || "Unable to extract the question.";
+
+          let friendlyError = errMsg;
+          switch (errType) {
+            case "EMPTY_IMAGE":
+              friendlyError = "Empty image data: The captured image or cropped region is empty or has no pixel variance.";
+              break;
+            case "LOW_QUALITY":
+              friendlyError = "OCR returned empty text: The text was completely unreadable, blurry, low-contrast, or contained no recognizable mathematical characters.";
+              break;
+            case "RATE_LIMIT":
+              friendlyError = "Rate limit exceeded: The backend service is currently throttled due to model high volume. Please retry in a few seconds.";
+              break;
+            case "TIMEOUT":
+              friendlyError = "Network failure: A connection timeout occurred, or the gateway is unresponsive.";
+              break;
+            case "MISSING_API_KEY":
+              friendlyError = "Invalid API key: No Google Gemini API key configured in AI Studio Secrets manager.";
+              break;
+            case "INVALID_INPUT":
+              friendlyError = "Unsupported image format or corrupt input. Try another screenshot.";
+              break;
+          }
+
+          // Retry ONLY for TIMEOUT or RATE_LIMIT
+          if (errType === "TIMEOUT" || errType === "RATE_LIMIT") {
+            lastErr = new Error(friendlyError);
+            attempt++;
+            continue; // Go to next attempt
+          } else {
+            // Immediately stop retry and throw for non-retryable errors
+            throw new Error(friendlyError);
+          }
+        }
+
+      } catch (err: any) {
+        lastErr = err;
+        console.warn(`[OCR Retry System] Attempt ${attempt + 1}/${maxRetries + 1} failed:`, err.message || err);
+        // Treat fetch/network/unclassified errors as custom retryable, let them backoff
+        attempt++;
       }
-    } else {
+    }
+
+    // Process final outcome when all attempts exhausted
+    setIsOcrProcessing(false);
+
+    if (!finalSuccess) {
       // Extracted retries fully exhausted
       const rawErrorStr = lastErr?.message || lastErr?.toString() || "Connection timeout";
       console.error("[Silent Tech Logger] OCR failure after exhausted retries:", rawErrorStr);
       
-      let finalFriendlyMsg = "⚠️ The OCR service is temporarily unavailable. Please try again.";
-      if (customFriendlyMsg) {
-        finalFriendlyMsg = customFriendlyMsg;
-      } else if (
-        rawErrorStr.includes("HTML_RESPONSE") || 
-        rawErrorStr.includes("Unexpected token") || 
-        rawErrorStr.includes("doctype") ||
-        rawErrorStr.includes("<!doctype") ||
-        rawErrorStr.includes("SyntaxError") ||
-        rawErrorStr.includes("JSON.parse")
-      ) {
-        finalFriendlyMsg = "⚠️ The OCR service is temporarily unavailable. Please try again.";
-      } else if (rawErrorStr.includes("Failed to fetch") || rawErrorStr.includes("network") || rawErrorStr.includes("Network")) {
-        finalFriendlyMsg = "⚠️ A connection timeout or network failure occurred. Please check your internet connection.";
-      } else {
-        finalFriendlyMsg = rawErrorStr;
+      let finalFriendlyMsg = rawErrorStr;
+      if (rawErrorStr.includes("Failed to fetch") || rawErrorStr.includes("network") || rawErrorStr.includes("Network")) {
+        finalFriendlyMsg = "⚠️ Network failure: A connection timeout occurred. Please check your internet connection.";
       }
 
       setOcrError(finalFriendlyMsg);
-      // Hide raw backend errors from users, logging them securely to the state for developers inside expandable details
       setTechnicalErrorDetails(
         fallbackText 
           ? `[API Response Raw]: ${fallbackText.substring(0, 1000)}` 
           : (lastErr?.stack || rawErrorStr)
       );
-      setIsOcrProcessing(false);
     }
   };
 
@@ -1133,27 +1117,13 @@ export default function CameraScanner({
                       <div className="p-5 rounded-2xl border border-rose-950/45 bg-[#170a0e] text-rose-300 flex flex-col gap-4 shadow-lg">
                         <div className="flex items-start gap-3">
                           <AlertCircle className="w-6 h-6 text-rose-500 shrink-0 mt-0.5" />
-                          <div>
-                            <h4 className="font-black text-xs uppercase tracking-wider text-rose-400 mb-1.5">
-                              ❌ Unable to extract the question.
+                          <div className="flex-1">
+                            <h4 className="font-extrabold text-sm text-rose-400 mb-2 leading-snug">
+                              {ocrError}
                             </h4>
-                            <p className="text-xs font-semibold text-slate-350 mb-3">
-                              Possible reasons:
+                            <p className="text-xs text-slate-400 leading-relaxed">
+                              Your device captured the image correctly, but the Solviora OCR engine was blocked from parsing the text. Review the technical details log below or try again.
                             </p>
-                            <ul className="text-xs space-y-1.5 text-slate-400 pl-1 list-none font-medium">
-                              <li className="flex items-center gap-1.5">
-                                <span className="text-rose-500">•</span> Poor image quality (e.g., blurry letters, low lighting)
-                              </li>
-                              <li className="flex items-center gap-1.5">
-                                <span className="text-rose-500">•</span> Network latency or gateway connection limits
-                              </li>
-                              <li className="flex items-center gap-1.5">
-                                <span className="text-rose-500">•</span> OCR model temporary server throttling
-                              </li>
-                              <li className="flex items-center gap-1.5">
-                                <span className="text-rose-500">•</span> Unsupported document file format / geometry
-                              </li>
-                            </ul>
                           </div>
                         </div>
 

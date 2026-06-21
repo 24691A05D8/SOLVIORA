@@ -97,14 +97,54 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  * using Gemini's powerful multimodal parsing capabilities.
  */
 app.post("/api/ocr", async (req, res) => {
+  // Helper to reliably build client-requested production JSON schema
+  const buildOcrResponse = (opt: {
+    status: "success" | "error";
+    errorType?: string | null;
+    errorMessage?: string;
+    extractedText?: string;
+    problemType?: "math" | "text" | "unknown";
+    confidence?: number;
+  }) => {
+    return {
+      status: opt.status,
+      error: {
+        type: opt.errorType || null,
+        message: opt.errorMessage || ""
+      },
+      data: {
+        extracted_text: opt.extractedText || "",
+        problem_type: opt.problemType || "unknown",
+        confidence: typeof opt.confidence === "number" ? opt.confidence : (opt.status === "success" ? 0.95 : 0.0)
+      },
+      retry: {
+        enabled: true,
+        attempts: 0,
+        max_attempts: 3,
+        delay_ms: 1000
+      }
+    };
+  };
+
+  // Check API Key first as specified
+  if (!process.env.GEMINI_API_KEY) {
+    console.error("[Backend OCR Logger] Server is missing GEMINI_API_KEY.");
+    return res.json(buildOcrResponse({
+      status: "error",
+      errorType: "MISSING_API_KEY",
+      errorMessage: "API key is not configured."
+    }));
+  }
+
   try {
     const { image, mimeType } = req.body;
 
     if (!image || typeof image !== "string" || !image.trim()) {
-      return res.status(400).json({
-        success: false,
-        error: "Missing or invalid image base64 data.",
-      });
+      return res.json(buildOcrResponse({
+        status: "error",
+        errorType: "EMPTY_IMAGE",
+        errorMessage: "No image content detected."
+      }));
     }
 
     // Sanitize and extract pure base64 database string
@@ -124,26 +164,51 @@ app.post("/api/ocr", async (req, res) => {
     try {
       ai = getGeminiClient();
     } catch (keyError: any) {
-      return res.status(500).json({
-        success: false,
-        error: `Configuration Error: ${keyError.message}`,
-      });
+      return res.json(buildOcrResponse({
+        status: "error",
+        errorType: "MISSING_API_KEY",
+        errorMessage: "API key is not configured."
+      }));
     }
 
-    const ocrPrompt = `You are an expert OCR and Educational Assistant under the name SOLVIORA.
-Analyze the provided image of a math, science, or general text question (printed or handwritten, simple or complex).
+    const ocrPrompt = `You are a production-grade OCR + API response engine under the name SOLVIORA.
 
-Your task is to:
-1. Perform high-accuracy Optical Character Recognition (OCR) to extract the text of the main question or calculation in the image exactly. Keep it tidy and clear.
-2. Evaluate if the image is clear enough to read accurately. If the image is blurry, has extremely low contrast, is too dark, or doesn't actually contain a readable math/science/text calculation, assess confidence as "low". Otherwise, assess confidence as "high".
-3. If it is high confidence, formulate the final text representation cleanly. If there is low confidence, still make your best attempt at extracting the text.
-4. Ensure you specify whether the extracted text represents a valid mathematical query/scientific question in "isQuestion".
+ABSOLUTE RULES:
+1. Always return ONLY valid JSON. No explanations, no markdown, no UI text.
+2. Never output partial JSON.
+3. Never output phrases like "analyzing", "processing", or debugging logs.
+4. Every response must strictly follow the schema below.
+5. Even on failure, return valid JSON (never plain text).
 
-Return valid, structured JSON output matching this schema:
-- extractedText: the extracted clean question
-- confidence: 'high' or 'low'
-- isQuestion: boolean
-- confidenceReason: simple description (e.g., "Clear mathematical handwriting", or "Image too dark/blurry")`;
+OUTPUT SCHEMA (DO NOT CHANGE):
+{
+  "status": "success",
+  "error": {
+    "type": null,
+    "message": ""
+  },
+  "data": {
+    "extracted_text": "the extracted clean math, formula, science or standard text question exactly",
+    "problem_type": "math",
+    "confidence": 0.95
+  },
+  "retry": {
+    "enabled": true,
+    "attempts": 0,
+    "max_attempts": 3,
+    "delay_ms": 1000
+  }
+}
+
+FALLBACK AND CRITICAL ERROR RULES (If you fail or cannot parse):
+- If image has no content or is blank -> status = "error", error.type = "EMPTY_IMAGE", error.message = "No image content detected."
+- If text is unreadable or blurry -> status = "error", error.type = "LOW_QUALITY", error.message = "Image is unclear or unreadable."
+- If request inputs are invalid -> status = "error", error.type = "INVALID_INPUT", error.message = "Invalid request input."
+
+RETRY RULES:
+- Retry ONLY for TIMEOUT or RATE_LIMIT.
+- Maximum retries = 3.
+- Increase delay exponentially (1s → 2s → 4s).`;
 
     const imagePart = {
       inlineData: {
@@ -153,7 +218,7 @@ Return valid, structured JSON output matching this schema:
     };
 
     const textPart = {
-      text: ocrPrompt,
+      text: ocrPrompt + "\n\nCRITICAL: Return ONLY valid JSON matching this schema.",
     };
 
     const generateParams = {
@@ -164,69 +229,206 @@ Return valid, structured JSON output matching this schema:
         responseSchema: {
           type: Type.OBJECT,
           properties: {
-            extractedText: {
+            status: {
               type: Type.STRING,
-              description: "The extracted math/science/text question from the image.",
+              description: "Status containing success or error",
             },
-            confidence: {
-              type: Type.STRING,
-              description: "OCR confidence level: either 'high' or 'low'.",
+            error: {
+              type: Type.OBJECT,
+              properties: {
+                type: {
+                  type: Type.STRING,
+                  description: "The specific error type if status is 'error', e.g. 'LOW_QUALITY', 'EMPTY_IMAGE'",
+                },
+                message: {
+                  type: Type.STRING,
+                  description: "Friendly description of failure or blank in success screen.",
+                }
+              },
+              required: ["type", "message"]
             },
-            isQuestion: {
-              type: Type.BOOLEAN,
-              description: "Whether the extracted text represents a valid math problem, scientific question, or readable text.",
-            },
-            confidenceReason: {
-              type: Type.STRING,
-              description: "Brief reason explaining why the confidence is high or low.",
-            },
+            data: {
+              type: Type.OBJECT,
+              properties: {
+                extracted_text: {
+                  type: Type.STRING,
+                  description: "The exactly captured text/mathematical problem content.",
+                },
+                problem_type: {
+                  type: Type.STRING,
+                  description: "math, text, or unknown calculation representation.",
+                },
+                confidence: {
+                  type: Type.NUMBER,
+                  description: "A numeric float from 0.0 to 1.0 reflecting confidence.",
+                }
+              },
+              required: ["extracted_text", "problem_type", "confidence"]
+            }
           },
-          required: ["extractedText", "confidence", "isQuestion", "confidenceReason"],
+          required: ["status", "error", "data"],
         },
       },
     };
 
     let response;
+    let textOutput = "";
+    let isSuccessful = false;
+
+    // Helper function to safely extract and parse JSON from the AI output
+    const safeParseJson = (text: string): any => {
+      if (!text) return null;
+      const cleaned = text.trim();
+      
+      try {
+        return JSON.parse(cleaned);
+      } catch (e) {
+        // Continue
+      }
+
+      try {
+        const jsonBlockRegex = /```(?:json)?\s*([\s\S]*?)\s*```/i;
+        const match = cleaned.match(jsonBlockRegex);
+        if (match && match[1]) {
+          return JSON.parse(match[1].trim());
+        }
+      } catch (e) {
+        // Continue
+      }
+
+      try {
+        const firstBrace = cleaned.indexOf('{');
+        const lastBrace = cleaned.lastIndexOf('}');
+        if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+          const candidateString = cleaned.substring(firstBrace, lastBrace + 1);
+          return JSON.parse(candidateString.trim());
+        }
+      } catch (e) {
+        // Continue
+      }
+
+      throw new Error("Unable to extract structured JSON from Gemini response.");
+    };
+
+    // Retry block for primary structured generation
     try {
+      console.info("[Backend OCR Logger] Initiating primary structured generation request...");
       response = await ai.models.generateContent(generateParams);
-    } catch (err: any) {
-      if (isTransientError(err)) {
-        console.warn("Gemini API returned 503/UNAVAILABLE during OCR, retrying with backoff...");
+      textOutput = response.text || "";
+      isSuccessful = true;
+    } catch (primaryErr: any) {
+      console.error("[Backend OCR Logger] Primary structured generation failed:", primaryErr.message || primaryErr);
+      
+      // Check if transient and retry
+      if (isTransientError(primaryErr)) {
+        console.warn("[Backend OCR Logger] Error is transient, retrying primary generation with simple backoff delay...");
         await sleep(2000);
         try {
           response = await ai.models.generateContent(generateParams);
+          textOutput = response.text || "";
+          isSuccessful = true;
         } catch (retryErr: any) {
-          return res.status(503).json({
-            success: false,
-            error: "⚠️ The AI OCR service is currently experiencing high demand. Please try again in a moment.",
-          });
+          console.error("[Backend OCR Logger] Retry of primary generation failed:", retryErr.message || retryErr);
         }
-      } else {
-        throw err;
       }
     }
 
-    const textOutput = response.text;
-    if (!textOutput) {
-      throw new Error("No response text returned from the AI OCR model.");
+    // Fallback: If primary structured generation failed, submit a schema-free request and parse manually
+    if (!isSuccessful || !textOutput || !textOutput.trim()) {
+      console.warn("[Backend OCR Logger] Initiating robust schema-less fallback request...");
+      try {
+        const fallbackParams = {
+          model: "gemini-3.5-flash",
+          contents: {
+            parts: [
+              imagePart,
+              {
+                text: ocrPrompt + "\n\nCRITICAL: You must return a single strict JSON object complying with the key mapping schema directly without code block markdown. Return ONLY JSON."
+              }
+            ]
+          }
+        };
+        const fallbackResponse = await ai.models.generateContent(fallbackParams);
+        textOutput = fallbackResponse.text || "";
+      } catch (fallbackErr: any) {
+        console.error("[Backend OCR Logger] Fallback schema-free generation also failed:", fallbackErr.message || fallbackErr);
+        return res.json(buildOcrResponse({
+          status: "error",
+          errorType: "TIMEOUT",
+          errorMessage: "Request timed out or gateway not responding."
+        }));
+      }
     }
 
-    const parsedData = JSON.parse(textOutput.trim());
+    if (!textOutput || !textOutput.trim()) {
+      return res.json(buildOcrResponse({
+        status: "error",
+        errorType: "LOW_QUALITY",
+        errorMessage: "Image is unclear or unreadable."
+      }));
+    }
 
-    return res.json({
-      success: true,
-      extractedText: parsedData.extractedText,
-      confidence: parsedData.confidence,
-      isQuestion: parsedData.isQuestion,
-      confidenceReason: parsedData.confidenceReason,
-    });
+    // Parse extracted JSON cleanly
+    let parsedData;
+    try {
+      parsedData = safeParseJson(textOutput);
+    } catch (parseE) {
+      return res.json(buildOcrResponse({
+        status: "error",
+        errorType: "INVALID_INPUT",
+        errorMessage: "Model returned non-JSON response structure."
+      }));
+    }
+
+    if (!parsedData) {
+      return res.json(buildOcrResponse({
+        status: "error",
+        errorType: "INVALID_INPUT",
+        errorMessage: "Could not parse valid mathematical data structure from the response."
+      }));
+    }
+
+    // Safely reconstruct the exact data values 
+    const statusVal = parsedData.status === "error" ? "error" : "success";
+    const errorTypeVal = parsedData.status === "error" ? (parsedData.error?.type || parsedData.error_type || "LOW_QUALITY") : null;
+    const errorMessageVal = parsedData.error?.message || parsedData.message || (statusVal === "success" ? "OCR completed successfully." : "Unreadable image contents.");
+    const extractedTextVal = parsedData.data?.extracted_text || parsedData.extractedText || "";
+    const problemTypeVal = parsedData.data?.problem_type || parsedData.problem_type || "unknown";
+    
+    let confidenceVal = 0.0;
+    if (statusVal === "success") {
+      const parsedConfValue = parsedData.data?.confidence !== undefined ? parsedData.data.confidence : parsedData.confidence;
+      if (typeof parsedConfValue === "number") {
+        confidenceVal = parsedConfValue;
+      } else if (parsedConfValue === "high") {
+        confidenceVal = 0.95;
+      } else if (parsedConfValue === "low") {
+        confidenceVal = 0.35;
+      } else {
+        confidenceVal = 0.95;
+      }
+    }
+
+    console.info("[Backend OCR Logger] Server-Side extraction completed. Extracted length:", extractedTextVal.length, "Confidence:", confidenceVal);
+
+    return res.json(buildOcrResponse({
+      status: statusVal,
+      errorType: errorTypeVal,
+      errorMessage: errorMessageVal,
+      extractedText: extractedTextVal,
+      problemType: problemTypeVal as any,
+      confidence: confidenceVal
+    }));
 
   } catch (error: any) {
     console.error("OCR API failed on Server-Side:", error);
-    return res.status(500).json({
-      success: false,
-      error: error.message || "An internal error occurred during the OCR extraction process.",
-    });
+    const errType = isTransientError(error) ? "RATE_LIMIT" : "INVALID_INPUT";
+    const errMsg = isTransientError(error) ? "Rate limit exceeded. Please retry later." : (error.message || "Invalid request input.");
+    return res.json(buildOcrResponse({
+      status: "error",
+      errorType: errType,
+      errorMessage: errMsg
+    }));
   }
 });
 
