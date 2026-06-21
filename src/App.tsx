@@ -40,7 +40,6 @@ import {
   Moon, 
   Share2, 
   Trash2, 
-  BookOpen, 
   ArrowRight,
   TrendingUp, 
   Copy, 
@@ -51,8 +50,6 @@ import {
   HelpCircle,
   RefreshCw
 } from "lucide-react";
-import Diagram from "./components/Diagram";
-import TeachyPanel from "./components/TeachyPanel";
 import { CalculationItem } from "./types";
 import { motion, AnimatePresence } from "motion/react";
 import SplashScreen from "./components/SplashScreen";
@@ -122,7 +119,7 @@ export default function App() {
   
   // --- CONFIGURABLE UX STATES ---
   const [isDark, setIsDark] = useState<boolean>(true); // Defaults to gorgeous deep navy slate dark theme
-  const [activeTab, setActiveTab] = useState<"calculator" | "tutor" | "history" | "academy">("tutor"); // Default tab displays AI Tutor first
+  const [activeTab, setActiveTab] = useState<"calculator" | "tutor" | "history">("tutor"); // Default tab displays AI Tutor first
 
   // --- CALCULATION INPUT & OUTPUT STATES ---
   const [expression, setExpression] = useState<string>("");
@@ -500,59 +497,12 @@ export default function App() {
         </div>
       </header>
 
-      {/* COMPACT SAAS ANNOUNCEMENT & BANNER */}
-      <div className="max-w-7xl mx-auto px-6 pt-6 w-full" id="alert-banner">
-        <div className={`rounded-3xl p-6 transition-all duration-300 shadow-xl overflow-hidden relative ${
-          isDark 
-            ? "bg-gradient-to-r from-[#111e35] via-[#101c31] to-[#1d3151] border border-slate-800" 
-            : "bg-gradient-to-r from-indigo-50/50 via-blue-50/50 to-indigo-100/50 border border-indigo-100/60"
-        }`}>
-          <div className="absolute top-0 right-0 w-64 h-64 bg-indigo-500/[0.04] rounded-full blur-3xl pointer-events-none"></div>
-          <div className="absolute bottom-0 left-0 w-64 h-64 bg-blue-500/[0.04] rounded-full blur-3xl pointer-events-none"></div>
-
-          <div className="relative z-10 flex flex-col md:flex-row items-center justify-between gap-6">
-            <div className="text-center md:text-left">
-              <div className="flex items-center gap-1.5 justify-center md:justify-start">
-                <span className="w-2 h-2 rounded-full bg-indigo-500 animate-ping"></span>
-                <span className="text-[10px] font-bold tracking-widest uppercase text-indigo-500">
-                  Full-stack Academic Sandbox
-                </span>
-              </div>
-              <h2 className="text-lg md:text-xl font-black mt-2 tracking-tight">
-                Experience real-time AI logic breakdown
-              </h2>
-              <p className={`text-xs mt-1.5 max-w-2xl leading-relaxed ${
-                isDark ? "text-slate-400" : "text-slate-500"
-              }`}>
-                This playground shows the difference between <strong>Client-side precision</strong> (immediate calculations computed inside your browser) and <strong>Server-side reasoning</strong> (asynchronous background processing powered by Google Gemini and Express.ts).
-              </p>
-            </div>
-
-            {/* Quick trigger statistics */}
-            <div className="flex gap-4" id="banner-stats">
-              <div className={`p-4 rounded-2xl border text-center min-w-[110px] ${
-                isDark ? "bg-[#0b1424]/40 border-slate-800" : "bg-white border-slate-200"
-              }`}>
-                <div className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Calculations</div>
-                <div className="text-lg font-black mt-1 text-indigo-500">{historyList.length} total</div>
-              </div>
-              <div className={`p-4 rounded-2xl border text-center min-w-[110px] ${
-                isDark ? "bg-[#0b1424]/40 border-slate-800" : "bg-white border-slate-200"
-              }`}>
-                <div className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Gateway status</div>
-                <div className="text-lg font-black mt-1 text-emerald-500">PORT 3000</div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
       {/* CORE NAVIGATION TABS PLATFORM */}
       <div className="max-w-7xl mx-auto px-6 mt-6 w-full" id="tabs-navigation-panel">
         <div className={`flex p-1.5 rounded-2xl border transition-all duration-300 ${
           isDark ? "bg-[#111e35]/60 border-slate-800" : "bg-slate-100 border-slate-200"
         }`}>
-          <div className="grid grid-cols-4 gap-1.5 w-full">
+          <div className="grid grid-cols-3 gap-1.5 w-full">
             <button
               onClick={() => setActiveTab("tutor")}
               className={`py-3.5 px-4 rounded-xl text-xs font-bold tracking-wide transition-all uppercase flex items-center justify-center gap-2 cursor-pointer ${
@@ -608,23 +558,6 @@ export default function App() {
                   <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-500"></span>
                 </span>
               )}
-            </button>
-
-            <button
-              onClick={() => setActiveTab("academy")}
-              className={`py-3.5 px-4 rounded-xl text-xs font-bold tracking-wide transition-all uppercase flex items-center justify-center gap-2 cursor-pointer ${
-                activeTab === "academy"
-                  ? isDark 
-                    ? "bg-gradient-to-r from-indigo-600 to-blue-500 text-white shadow-lg shadow-indigo-600/20 scale-[1.01]" 
-                    : "bg-white text-indigo-700 shadow shadow-slate-200 scale-[1.01]"
-                  : isDark 
-                    ? "text-slate-400 hover:text-slate-200 hover:bg-[#1a2d4b]/40" 
-                    : "text-slate-600 hover:text-slate-900 hover:bg-slate-200/50"
-              }`}
-              id="tab-btn-academy"
-            >
-              <BookOpen className="w-4 h-4 shrink-0" />
-              <span className="hidden sm:inline">Developer Academy</span>
             </button>
           </div>
         </div>
@@ -796,9 +729,6 @@ export default function App() {
                 {/* Right side column: Tutor response visualizers */}
                 <div className="lg:col-span-12 xl:col-span-7 flex flex-col gap-6">
                   
-                  {/* DIRECT DIAGRAM STEPPERS MOUNTED HERE */}
-                  <Diagram activeStep={activeStep} isDark={isDark} />
-
                   {/* COMPUTATIONAL REAL-TIME TUTOR EXPLANATIONS CARD */}
                   <div className={`border rounded-3xl p-6 transition-all duration-300 relative flex-1 flex flex-col ${
                     isDark 
@@ -926,7 +856,7 @@ export default function App() {
                             : "bg-emerald-50/60 border-emerald-100 text-emerald-900"
                         }`} id="tutor-essay-card">
                           <h4 className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-emerald-600 mb-2">
-                            <BookOpen className="w-3.5 h-3.5 text-emerald-500" />
+                            <Sparkles className="w-3.5 h-3.5 text-emerald-500" />
                             Tutor Methodology Notes
                           </h4>
                           <div>
@@ -1313,48 +1243,16 @@ export default function App() {
             </motion.div>
           )}
 
-          {/* TAB 4: DEVELOPER GUIDE / TUTORIALS */}
-          {activeTab === "academy" && (
-            <motion.div
-              key="academy-tab"
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              transition={{ duration: 0.25 }}
-              className="space-y-6"
-              id="view-academy"
-            >
-              <div className="flex items-center gap-2 pl-1 mb-2">
-                <BookOpen className="w-5 h-5 text-indigo-500 animate-pulse" />
-                <h3 className="font-extrabold text-sm uppercase tracking-wider">Under The Hood Developer Files</h3>
-              </div>
-              <TeachyPanel isDark={isDark} />
-            </motion.div>
-          )}
         </AnimatePresence>
       </main>
 
-      {/* FOOTER & STATUS BAR SECTION */}
-      <footer className={`px-6 py-4 flex flex-col md:flex-row items-center justify-between gap-4 shrink-0 mt-auto text-xs font-mono transition-all duration-300 ${
+      {/* FOOTER SECTION */}
+      <footer className={`px-6 py-6 border-t font-sans transition-all duration-300 text-center text-xs tracking-wider ${
         isDark 
-          ? "bg-[#0b1424] border-t border-slate-800 text-slate-400" 
-          : "bg-slate-900 text-slate-400"
+          ? "bg-[#0b1424] border-slate-800 text-slate-500" 
+          : "bg-white border-slate-200 text-slate-400"
       }`} id="saas-footer">
-        
-        <div className="flex flex-wrap gap-4 justify-center md:justify-start">
-          <div className="flex items-center gap-2 text-emerald-400 font-bold uppercase text-[10px] tracking-widest">
-            <span className="w-2.5 h-2.5 bg-emerald-500 rounded-full animate-ping shrink-0"></span>
-            <span>Local Node Engine Active</span>
-          </div>
-          <div className="text-slate-500 border-l border-slate-700 pl-4 hidden sm:block font-bold">
-            <span>PORT: 3000</span>
-          </div>
-          <div className="text-slate-500 border-l border-slate-700 p-0 sm:pl-4 font-bold">
-            <span>DATABASE: LOCAL STORAGE DISPATCH</span>
-          </div>
-        </div>
-
-        <div className="text-[10px] text-slate-400 font-bold uppercase tracking-wider text-center md:text-right">
+        <div>
           &copy; 2026 SOLVIORA • THE SMART TUTOR
         </div>
       </footer>
