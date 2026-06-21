@@ -157,7 +157,7 @@ Return valid, structured JSON output matching this schema:
     };
 
     const generateParams = {
-      model: "gemini-2.5-flash",
+      model: "gemini-3.5-flash",
       contents: { parts: [imagePart, textPart] },
       config: {
         responseMimeType: "application/json",
@@ -291,7 +291,7 @@ Rules to follow:
 Question: ${question}`;
 
     const generateParams = {
-      model: "gemini-2.5-flash",
+      model: "gemini-3.5-flash",
       contents: promptContents,
       config: {
         // Enforce returning structured JSON matching our strict Schema

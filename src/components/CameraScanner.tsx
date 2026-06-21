@@ -357,6 +357,13 @@ export default function CameraScanner({
       const pxW = img.width * cropWPercentage;
       const pxH = img.height * cropHPercentage;
 
+      // Ensure cropped width and height are strictly greater than 0
+      if (pxW <= 0 || pxH <= 0 || isNaN(pxW) || isNaN(pxH)) {
+        console.error("[Silent Tech Logger] Selected crop dimensions are too small or invalid:", { pxW, pxH });
+        setOcrError("⚠️ Selected crop region is empty or too small. Please expand the cropping boundaries.");
+        return;
+      }
+
       canvas.width = pxW;
       canvas.height = pxH;
 
@@ -395,11 +402,68 @@ export default function CameraScanner({
     setTechnicalErrorDetails(null);
     setOcrConfidencePercent(null);
     setIsDeveloperDetailsExp(false);
+
+    // Helper utility to convert base64 image strings to raw Blobs
+    const dataURLtoBlob = (dataurl: string) => {
+      try {
+        const arr = dataurl.split(',');
+        const mime = arr[0].match(/:(.*?);/)?.[1] || 'image/png';
+        const bstr = atob(arr[1]);
+        let n = bstr.length;
+        const u8arr = new Uint8Array(n);
+        while (n--) {
+          u8arr[n] = bstr.charCodeAt(n);
+        }
+        return new Blob([u8arr], { type: mime });
+      } catch (e) {
+        return null;
+      }
+    };
+
+    const blob = dataURLtoBlob(imageB64);
+    const blobSize = blob ? blob.size : 0;
+    const blobType = blob ? blob.type : "unknown";
+    const b64Length = imageB64 ? imageB64.length : 0;
+
+    // Verbose, structured audit logging for developer console diagnostics
+    console.info("========================================");
+    console.info("⚡ SOLVIORA MULTIMODAL OCR ENGINE DIAGNOSTICS");
+    console.info(`- Crop coordinates: X=${cropBox.x}%, Y=${cropBox.y}%, W=${cropBox.w}%, H=${cropBox.h}%`);
+    console.info(`- Base64 length: ${b64Length} characters`);
+    console.info(`- Decoded Blob type: ${blobType}`);
+    console.info(`- Decoded Blob size: ${blobSize} bytes (${(blobSize / 1024).toFixed(2)} KB)`);
+    console.info("========================================");
+
+    // Prevent submitting empty or invalid files
+    if (!imageB64 || b64Length < 100) {
+      setOcrError("⚠️ Captured image payload is empty. Please capture or upload another visual.");
+      setIsOcrProcessing(false);
+      return;
+    }
+
+    if (!blob || blobSize === 0) {
+      setOcrError("⚠️ Image stream could not be converted to a valid file payload. Size is empty.");
+      setIsOcrProcessing(false);
+      return;
+    }
+
+    const validMimes = ["image/png", "image/jpeg", "image/webp"];
+    if (!validMimes.includes(blobType)) {
+      setOcrError(`⚠️ Unsupported file format: ${blobType}. Clean text extraction requires PNG, JPEG or WEBP.`);
+      setIsOcrProcessing(false);
+      return;
+    }
+
+    if (cropBox.w <= 0 || cropBox.h <= 0) {
+      setOcrError("⚠️ Crop area coordinates must be positive and non-empty. Modify the crop border.");
+      setIsOcrProcessing(false);
+      return;
+    }
     
     const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
     
     let attempt = 0;
-    const maxRetries = 2; // up to 2 retries (total 3 attempts)
+    const maxRetries = 2; // Retry up to 2 times (3 total attempts)
     let finalResponse: Response | null = null;
     let fallbackText: string | null = null;
     let customFriendlyMsg: string | null = null;
@@ -408,7 +472,8 @@ export default function CameraScanner({
     while (attempt <= maxRetries) {
       try {
         if (attempt > 0) {
-          await sleep(2000); // 2-second delay between retrying
+          console.warn(`[OCR Retry System] Resubmitting request (Attempt ${attempt + 1}/${maxRetries + 1}) in 2 seconds...`);
+          await sleep(2000); // 2-second delay between retries
         }
 
         const response = await fetch("/api/ocr", {
@@ -418,11 +483,21 @@ export default function CameraScanner({
           },
           body: JSON.stringify({
             image: imageB64,
-            mimeType: "image/png"
+            mimeType: blobType
           }),
         });
 
         const contentType = response.headers.get("content-type") || "";
+
+        // Diagnostic extraction of response headers
+        const responseHeaders: Record<string, string> = {};
+        response.headers.forEach((val, key) => {
+          responseHeaders[key] = val;
+        });
+
+        console.info(`[HTTP Attempt ${attempt + 1}] Status Code: ${response.status} ${response.statusText}`);
+        console.info(`[HTTP Attempt ${attempt + 1}] Content-Type Header: ${contentType}`);
+        console.info(`[HTTP Attempt ${attempt + 1}] Response Headers:`, responseHeaders);
 
         // Verification step 1: Check response.ok before parsing
         if (!response.ok) {
@@ -430,16 +505,17 @@ export default function CameraScanner({
           if (!contentType.includes("application/json")) {
             const rawBody = await response.text().catch(() => "");
             fallbackText = rawBody;
-            console.error(`[Silent Tech Logger] Non-JSON error body (HTTP ${response.status}):`, rawBody.substring(0, 400));
+            console.error(`[Silent Tech Logger] Non-JSON error body (HTTP ${response.status}):`, rawBody.substring(0, 500));
           } else {
             const errPayload = await response.json().catch(() => ({}));
             fallbackText = JSON.stringify(errPayload);
+            console.error(`[Silent Tech Logger] JSON error payload (HTTP ${response.status}):`, errPayload);
             if (errPayload.error) {
               throw new Error(errPayload.error);
             }
           }
 
-          // Handle HTTP Statuses
+          // Classify friendly user errors depending on HTTP Code
           if (response.status === 400) {
             customFriendlyMsg = "⚠️ The OCR service received an invalid request format. Please try again.";
           } else if (response.status === 401) {
@@ -463,6 +539,7 @@ export default function CameraScanner({
         if (!contentType.includes("application/json")) {
           const rawText = await response.text().catch(() => "");
           fallbackText = rawText;
+          console.error(`[Silent Tech Logger] Non-JSON response received on success route (HTTP ${response.status}):`, rawText.substring(0, 500));
           throw new Error("⚠️ The OCR service responded with an invalid format. Please try again.");
         }
 
@@ -472,16 +549,31 @@ export default function CameraScanner({
 
       } catch (err: any) {
         lastErr = err;
-        console.warn(`[OCR Retry System] Attempt ${attempt + 1}/${maxRetries + 1} encountered an issue:`, err.message || err);
+        console.warn(`[OCR Retry System] Attempt ${attempt + 1}/${maxRetries + 1} failed:`, err.message || err);
         attempt++;
       }
     }
 
-    // Now process final outcome
+    // Process final outcome
     if (finalResponse) {
       try {
+        const responseBodyText = await finalResponse.clone().text().catch(() => "");
+        console.info(`[HTTP Success Payload] Body Length: ${responseBodyText.length} characters`);
+        console.info(`[HTTP Success Payload] Body Sample:`, responseBodyText.substring(0, 500));
+
         const data = await finalResponse.json();
         if (data.success) {
+          // Check for empty text extraction and classify potential failures gracefully
+          if (!data.extractedText || !data.extractedText.trim()) {
+            let triageMsg = "⚠️ OCR succeeded but extracted text is empty.\n";
+            triageMsg += "Potential Causes:\n";
+            triageMsg += "- The cropped image area does not contain readable letters/numbers.\n";
+            triageMsg += "- The photo is too blurry or low-contrast.\n";
+            triageMsg += "- Empty image uploaded or wrong crop/export coordinates.\n";
+            triageMsg += "- AI provider returned empty text under high load.";
+            throw new Error(triageMsg);
+          }
+
           setExtractedResult(data.extractedText || "");
           
           // Calculate deterministic score percent inside range targets based on text
@@ -515,8 +607,8 @@ export default function CameraScanner({
           throw new Error(data.error || "Failed to extract clean readable question.");
         }
       } catch (parseErr: any) {
-        console.error("[Silent Tech Logger] Success payload parsing failed:", parseErr);
-        setOcrError("⚠️ The OCR service is temporarily unavailable. Please try again.");
+        console.error("[Silent Tech Logger] Success payload processing failed:", parseErr);
+        setOcrError(parseErr.message || "⚠️ The OCR service is temporarily unavailable. Please try again.");
         setTechnicalErrorDetails(parseErr.stack || parseErr.toString());
       } finally {
         setIsOcrProcessing(false);

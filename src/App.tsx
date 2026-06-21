@@ -54,6 +54,7 @@ import { CalculationItem } from "./types";
 import { motion, AnimatePresence } from "motion/react";
 import SplashScreen from "./components/SplashScreen";
 import CameraScanner from "./components/CameraScanner";
+import ErrorBoundary from "./components/ErrorBoundary";
 
 // Custom parser to format explanation markdown elements to JSX nicely
 function renderExplanation(text: string, isDark: boolean) {
@@ -606,16 +607,21 @@ export default function App() {
 
                     {/* MULTIMODAL CAMERA/IMAGE OCR SCANNER COMPONENT */}
                     <div className="mb-4">
-                      <CameraScanner
-                        isDark={isDark}
-                        onTextScanned={(extractedText, solveImmediately) => {
-                          setAiQuestion(extractedText);
-                          if (solveImmediately) {
-                            handleAiExplain(extractedText);
-                          }
-                        }}
-                        isLoadingSolver={isLoading}
-                      />
+                      <ErrorBoundary
+                        fallbackTitle="OCR Scanner Inactive"
+                        fallbackMessage="The Solviora OCR image scanner captured a rendering exception. Rest assured, you can still type your questions manually below."
+                      >
+                        <CameraScanner
+                          isDark={isDark}
+                          onTextScanned={(extractedText, solveImmediately) => {
+                            setAiQuestion(extractedText);
+                            if (solveImmediately) {
+                              handleAiExplain(extractedText);
+                            }
+                          }}
+                          isLoadingSolver={isLoading}
+                        />
+                      </ErrorBoundary>
                     </div>
 
                     <form 
