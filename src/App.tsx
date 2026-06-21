@@ -779,15 +779,15 @@ export default function App() {
                             <Sparkle className="w-4 h-4 animate-ping" />
                           </div>
                         </div>
-                        <h4 className="font-bold text-sm tracking-tight">
-                          {activeStep === 1 && "Verifying input statement logic..."}
-                          {activeStep === 2 && "Packing dynamic JSON stream variables..."}
-                          {activeStep === 3 && "Secure Express backend gateway exchanging tokens..."}
-                          {activeStep === 4 && "Interpreting responses from Gemini..."}
-                          {activeStep === 5 && "Formatting visual results cards..."}
+                        <h4 className="font-bold text-sm tracking-tight text-indigo-400">
+                          {activeStep === 1 && "Analyzing input question..."}
+                          {activeStep === 2 && "Decomposing calculation..."}
+                          {activeStep === 3 && "Connecting to AI Tutor..."}
+                          {activeStep === 4 && "Generating solution steps..."}
+                          {activeStep === 5 && "Formatting results..."}
                         </h4>
-                        <p className="text-[10px] font-mono text-indigo-400/80 uppercase mt-1">
-                          Networking active in background thread...
+                        <p className="text-[10px] text-slate-400 uppercase mt-1">
+                          Evaluating logic securely...
                         </p>
                       </div>
                     ) : (
@@ -897,7 +897,7 @@ export default function App() {
                     <h3 className="font-extrabold text-sm uppercase tracking-wider">Classical Precision</h3>
                   </div>
                   <span className="text-[10px] bg-slate-500/10 text-slate-400 font-bold uppercase tracking-widest px-2 py-0.5 rounded-full font-mono">
-                    Local Core Client
+                    Standard Math
                   </span>
                 </div>
 
@@ -1160,7 +1160,7 @@ export default function App() {
                       id="clear-all-history-btn"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
-                      Wipe database memory
+                      Clear History
                     </button>
                   )}
                 </div>
