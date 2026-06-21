@@ -560,47 +560,20 @@ export default function CameraScanner({
         // Handle error status inside response
         if (data.status === "error") {
           const errCode = data.error_code;
-          const errType = data.error_type || data.error?.type;
-          let friendlyError = "Unable to extract the question.";
-          
-          switch (errCode) {
-            case 1001:
-              friendlyError = "Empty image: No readable content detected.";
-              break;
-            case 1002:
-              friendlyError = "Image is unclear or unreadable.";
-              break;
-            case 1003:
-              friendlyError = "Error decoding image: The uploaded or captured screenshot file is corrupt.";
-              break;
-            case 1004:
-              friendlyError = "Unsupported format: Only PNG, JPEG, WEBP, and HEIC/HEIF images are supported.";
-              break;
-            case 1005:
-              friendlyError = "Rate limit exceeded. Please retry later.";
-              break;
-            case 1006:
-              friendlyError = "Request timed out or gateway not responding.";
-              break;
-            case 1007:
-              friendlyError = "API key is not configured.";
-              break;
-            case 1008:
-              friendlyError = "Unsupported image format or corrupt input. Try another screenshot.";
-              break;
-            default:
-              switch (errType) {
-                case "EMPTY_IMAGE": friendlyError = "Empty image: No readable content detected."; break;
-                case "LOW_QUALITY": friendlyError = "Image is unclear or unreadable."; break;
-                case "CORRUPT_IMAGE": friendlyError = "Error decoding image: The uploaded or captured screenshot file is corrupt."; break;
-                case "UNSUPPORTED_FORMAT": friendlyError = "Unsupported format: Only PNG, JPEG, WEBP, and HEIC/HEIF images are supported."; break;
-                case "RATE_LIMIT": friendlyError = "Rate limit exceeded. Please retry later."; break;
-                case "TIMEOUT": friendlyError = "Request timed out or gateway not responding."; break;
-                case "MISSING_API_KEY": friendlyError = "API key is not configured."; break;
-                case "INVALID_INPUT": friendlyError = "Unsupported image format or corrupt input. Try another screenshot."; break;
-              }
-              break;
-          }
+          const errType = data.error_type;
+
+          const errorMap: Record<number, string> = {
+            1001: "No image detected",
+            1002: "Image too blurry",
+            1003: "File corrupted",
+            1004: "Unsupported format",
+            1005: "Too many requests",
+            1006: "Network timeout",
+            1007: "API not configured",
+            1008: "Invalid input"
+          };
+
+          const friendlyError = errorMap[errCode] || "Unsupported image format or corrupt input. Try another screenshot.";
 
           // Retry ONLY for TIMEOUT or RATE_LIMIT
           if (errCode === 1006 || errCode === 1005 || errType === "TIMEOUT" || errType === "RATE_LIMIT") {
@@ -1134,7 +1107,7 @@ export default function CameraScanner({
                               {ocrError}
                             </h4>
                             <p className="text-xs text-slate-400 leading-relaxed">
-                              Your device captured the image correctly, but the Solviora OCR engine was blocked from parsing the text. Review the technical details log below or try again.
+                              Your device captured the image correctly, but the Solviora OCR engine was blocked from parsing the text. Review the technical details log below.
                             </p>
                           </div>
                         </div>
@@ -1171,7 +1144,7 @@ export default function CameraScanner({
                             className="py-1.5 px-3 rounded-lg bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 border border-indigo-500/20 font-extrabold text-[10px] uppercase tracking-wider flex items-center gap-1.5 transition cursor-pointer"
                           >
                             <Camera className="w-3.5 h-3.5" />
-                            <span>📷 Capture Again</span>
+                            <span>📷 New Scan</span>
                           </button>
                         </div>
 

@@ -339,7 +339,7 @@ export default function App() {
       }
     } catch (err: any) {
       console.error("AI service error: ", err);
-      setErrorMsg("⚠️ The AI service is currently experiencing high demand or is temporarily unavailable.\nPlease wait a few moments and try again.");
+      setErrorMsg("⚠️ The AI service is currently experiencing high demand or is temporarily unavailable.\nPlease wait a few moments before requesting a new calculation.");
       setActiveStep(0);
     } finally {
       setIsLoading(false);
@@ -702,7 +702,7 @@ export default function App() {
                         <div className={`p-3 rounded-xl text-[10px] font-semibold leading-relaxed border ${
                           isDark ? 'bg-rose-950/10 border-rose-900/20 text-slate-400' : 'bg-rose-100/30 border-rose-100/40 text-rose-700'
                         }`}>
-                          💡 Suggestion: Please try again after a short delay. Your math question has been preserved above so you can click below to retry.
+                          💡 Suggestion: Please request the explanation again after a short delay. Your math question has been preserved above so you can click below to retry.
                         </div>
 
                         <button

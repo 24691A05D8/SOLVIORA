@@ -25,7 +25,7 @@ import path from "path";
 import dotenv from "dotenv";
 import { GoogleGenAI, Type } from "@google/genai";
 import { createServer as createViteServer } from "vite";
-import { validateOCR } from "./src/ocrValidator";
+import { validateOCR, hardParser } from "./src/ocrValidator";
 
 // Load environment variables from .env file (for local development)
 dotenv.config();
@@ -373,60 +373,19 @@ FALLBACK AND CRITICAL ERROR RULES (If you fail or cannot parse):
       }
     }
 
-    if (!textOutput || !textOutput.trim()) {
-      return res.json(buildOcrResponse({
-        status: "error",
-        errorType: "LOW_QUALITY"
-      }));
-    }
+    // Strict Output Gate: Gemini -> HARD PARSER -> validateOCR -> frontend
+    const finalResult = validateOCR(hardParser(textOutput));
 
-    // Parse extracted JSON cleanly
-    let parsedData;
-    try {
-      parsedData = safeParseJson(textOutput);
-    } catch (parseE) {
-      return res.json(buildOcrResponse({
-        status: "error",
-        errorType: "LOW_QUALITY"
-      }));
-    }
+    console.info(
+      "[Backend OCR Logger] Server-Side extraction completed. Status:",
+      finalResult.status,
+      "Extracted length:",
+      finalResult.data.text.length,
+      "Confidence:",
+      finalResult.data.confidence
+    );
 
-    if (!parsedData) {
-      return res.json(buildOcrResponse({
-        status: "error",
-        errorType: "LOW_QUALITY"
-      }));
-    }
-
-    // Safely reconstruct the exact data values 
-    const statusVal = parsedData.status === "error" ? "error" : "success";
-    const errorTypeVal = parsedData.status === "error" ? (parsedData.error_type || parsedData.error?.type || parsedData.errorType || "LOW_QUALITY") : null;
-    const extractedTextVal = parsedData.data?.text || parsedData.data?.extracted_text || parsedData.extractedText || "";
-    const problemTypeVal = parsedData.data?.problem_type || parsedData.problem_type || "unknown";
-    
-    let confidenceVal = 0.0;
-    if (statusVal === "success") {
-      const parsedConfValue = parsedData.data?.confidence !== undefined ? parsedData.data.confidence : parsedData.confidence;
-      if (typeof parsedConfValue === "number") {
-        confidenceVal = parsedConfValue;
-      } else if (parsedConfValue === "high") {
-        confidenceVal = 0.95;
-      } else if (parsedConfValue === "low") {
-        confidenceVal = 0.35;
-      } else {
-        confidenceVal = 0.95;
-      }
-    }
-
-    console.info("[Backend OCR Logger] Server-Side extraction completed. Extracted length:", extractedTextVal.length, "Confidence:", confidenceVal);
-
-    return res.json(buildOcrResponse({
-      status: statusVal,
-      errorType: errorTypeVal as any,
-      extractedText: extractedTextVal,
-      confidence: confidenceVal,
-      problemType: problemTypeVal as any
-    }));
+    return res.json(finalResult);
 
   } catch (error: any) {
     console.error("OCR API failed on Server-Side:", error);
@@ -541,7 +500,7 @@ Question: ${question}`;
           console.error("Retry failed for Gemini API due to persistent 503 status:", retryErr);
           return res.status(503).json({
             success: false,
-            error: "⚠️ The AI service is currently experiencing high demand or is temporarily unavailable.\nPlease wait a few moments and try again.",
+            error: "⚠️ The AI service is currently experiencing high demand or is temporarily unavailable.\nPlease wait a few moments before requesting a new calculation.",
           });
         }
       } else {
