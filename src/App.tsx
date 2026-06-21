@@ -53,6 +53,7 @@ import {
 import { CalculationItem } from "./types";
 import { motion, AnimatePresence } from "motion/react";
 import SplashScreen from "./components/SplashScreen";
+import CameraScanner from "./components/CameraScanner";
 
 // Custom parser to format explanation markdown elements to JSX nicely
 function renderExplanation(text: string, isDark: boolean) {
@@ -597,11 +598,25 @@ export default function App() {
                       Solve with AI Tutor
                     </h3>
                     
-                    <p className={`text-xs mb-5 leading-normal ${
+                    <p className={`text-xs mb-4 leading-normal ${
                       isDark ? "text-slate-400" : "text-slate-500"
                     }`}>
                       Type any arithmetic calculation or conceptual word problem, then watch Gemini decompose execution routines step-by-step.
                     </p>
+
+                    {/* MULTIMODAL CAMERA/IMAGE OCR SCANNER COMPONENT */}
+                    <div className="mb-4">
+                      <CameraScanner
+                        isDark={isDark}
+                        onTextScanned={(extractedText, solveImmediately) => {
+                          setAiQuestion(extractedText);
+                          if (solveImmediately) {
+                            handleAiExplain(extractedText);
+                          }
+                        }}
+                        isLoadingSolver={isLoading}
+                      />
+                    </div>
 
                     <form 
                       onSubmit={(e) => {

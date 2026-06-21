@@ -1,6 +1,6 @@
 {
   "name": "Smart AI Calculator",
   "description": "An interactive smart calculator combining a classical layout with an AI-powered natural language solver, step-by-step processing diagrams, and session calculation histories for beginner developers.",
-  "requestFramePermissions": [],
+  "requestFramePermissions": ["camera"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

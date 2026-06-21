@@ -92,6 +92,145 @@ function isTransientError(error: any): boolean {
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
+ * --- THE API ROUTE: OCR MULTIMODAL QUESTION SCANNER ---
+ * Extracts math, science, or general text questions from uploaded or captured base64 images
+ * using Gemini's powerful multimodal parsing capabilities.
+ */
+app.post("/api/ocr", async (req, res) => {
+  try {
+    const { image, mimeType } = req.body;
+
+    if (!image || typeof image !== "string" || !image.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing or invalid image base64 data.",
+      });
+    }
+
+    // Sanitize and extract pure base64 database string
+    let resolvedMimeType = mimeType || "image/png";
+    let base64Data = image;
+
+    if (image.startsWith("data:")) {
+      const matches = image.match(/^data:([^;]+);base64,(.*)$/);
+      if (matches && matches.length === 3) {
+        resolvedMimeType = matches[1];
+        base64Data = matches[2];
+      }
+    }
+
+    // Lazily get initialized Gemini client
+    let ai;
+    try {
+      ai = getGeminiClient();
+    } catch (keyError: any) {
+      return res.status(500).json({
+        success: false,
+        error: `Configuration Error: ${keyError.message}`,
+      });
+    }
+
+    const ocrPrompt = `You are an expert OCR and Educational Assistant under the name SOLVIORA.
+Analyze the provided image of a math, science, or general text question (printed or handwritten, simple or complex).
+
+Your task is to:
+1. Perform high-accuracy Optical Character Recognition (OCR) to extract the text of the main question or calculation in the image exactly. Keep it tidy and clear.
+2. Evaluate if the image is clear enough to read accurately. If the image is blurry, has extremely low contrast, is too dark, or doesn't actually contain a readable math/science/text calculation, assess confidence as "low". Otherwise, assess confidence as "high".
+3. If it is high confidence, formulate the final text representation cleanly. If there is low confidence, still make your best attempt at extracting the text.
+4. Ensure you specify whether the extracted text represents a valid mathematical query/scientific question in "isQuestion".
+
+Return valid, structured JSON output matching this schema:
+- extractedText: the extracted clean question
+- confidence: 'high' or 'low'
+- isQuestion: boolean
+- confidenceReason: simple description (e.g., "Clear mathematical handwriting", or "Image too dark/blurry")`;
+
+    const imagePart = {
+      inlineData: {
+        mimeType: resolvedMimeType,
+        data: base64Data,
+      },
+    };
+
+    const textPart = {
+      text: ocrPrompt,
+    };
+
+    const generateParams = {
+      model: "gemini-2.5-flash",
+      contents: { parts: [imagePart, textPart] },
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            extractedText: {
+              type: Type.STRING,
+              description: "The extracted math/science/text question from the image.",
+            },
+            confidence: {
+              type: Type.STRING,
+              description: "OCR confidence level: either 'high' or 'low'.",
+            },
+            isQuestion: {
+              type: Type.BOOLEAN,
+              description: "Whether the extracted text represents a valid math problem, scientific question, or readable text.",
+            },
+            confidenceReason: {
+              type: Type.STRING,
+              description: "Brief reason explaining why the confidence is high or low.",
+            },
+          },
+          required: ["extractedText", "confidence", "isQuestion", "confidenceReason"],
+        },
+      },
+    };
+
+    let response;
+    try {
+      response = await ai.models.generateContent(generateParams);
+    } catch (err: any) {
+      if (isTransientError(err)) {
+        console.warn("Gemini API returned 503/UNAVAILABLE during OCR, retrying with backoff...");
+        await sleep(2000);
+        try {
+          response = await ai.models.generateContent(generateParams);
+        } catch (retryErr: any) {
+          return res.status(503).json({
+            success: false,
+            error: "⚠️ The AI OCR service is currently experiencing high demand. Please try again in a moment.",
+          });
+        }
+      } else {
+        throw err;
+      }
+    }
+
+    const textOutput = response.text;
+    if (!textOutput) {
+      throw new Error("No response text returned from the AI OCR model.");
+    }
+
+    const parsedData = JSON.parse(textOutput.trim());
+
+    return res.json({
+      success: true,
+      extractedText: parsedData.extractedText,
+      confidence: parsedData.confidence,
+      isQuestion: parsedData.isQuestion,
+      confidenceReason: parsedData.confidenceReason,
+    });
+
+  } catch (error: any) {
+    console.error("OCR API failed on Server-Side:", error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || "An internal error occurred during the OCR extraction process.",
+    });
+  }
+});
+
+/**
  * --- THE API ROUTE: AI CALCULATION ENGINE ---
  * [BACKEND RECEIVE] This endpoint receives the raw question from the frontend, verifies it,
  * communicates with the Gemini model, receives the response, and formats it as JSON.
