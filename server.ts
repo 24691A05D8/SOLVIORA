@@ -97,31 +97,39 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  * using Gemini's powerful multimodal parsing capabilities.
  */
 app.post("/api/ocr", async (req, res) => {
-  // Helper to reliably build client-requested production JSON schema
+  // Helper to reliably build client-requested strict production JSON schema
   const buildOcrResponse = (opt: {
     status: "success" | "error";
-    errorType?: string | null;
-    errorMessage?: string;
+    errorType?: "EMPTY_IMAGE" | "LOW_QUALITY" | "CORRUPT_IMAGE" | "UNSUPPORTED_FORMAT" | "RATE_LIMIT" | "TIMEOUT" | "MISSING_API_KEY" | "INVALID_INPUT" | null;
+    errorCode?: number;
     extractedText?: string;
-    problemType?: "math" | "text" | "unknown";
     confidence?: number;
+    problemType?: "math" | "text" | "unknown";
   }) => {
+    let errorCodeVal = opt.errorCode || 0;
+    if (opt.status === "error" && !errorCodeVal) {
+      switch (opt.errorType) {
+        case "EMPTY_IMAGE": errorCodeVal = 1; break;
+        case "LOW_QUALITY": errorCodeVal = 2; break;
+        case "CORRUPT_IMAGE": errorCodeVal = 3; break;
+        case "UNSUPPORTED_FORMAT": errorCodeVal = 4; break;
+        case "RATE_LIMIT": errorCodeVal = 5; break;
+        case "TIMEOUT": errorCodeVal = 6; break;
+        case "MISSING_API_KEY": errorCodeVal = 7; break;
+        case "INVALID_INPUT": errorCodeVal = 8; break;
+        default: errorCodeVal = 9; break;
+      }
+    }
     return {
       status: opt.status,
       error: {
         type: opt.errorType || null,
-        message: opt.errorMessage || ""
+        code: errorCodeVal
       },
       data: {
         extracted_text: opt.extractedText || "",
-        problem_type: opt.problemType || "unknown",
-        confidence: typeof opt.confidence === "number" ? opt.confidence : (opt.status === "success" ? 0.95 : 0.0)
-      },
-      retry: {
-        enabled: true,
-        attempts: 0,
-        max_attempts: 3,
-        delay_ms: 1000
+        confidence: typeof opt.confidence === "number" ? opt.confidence : (opt.status === "success" ? 0.95 : 0.0),
+        problem_type: opt.problemType || "unknown"
       }
     };
   };
@@ -131,8 +139,7 @@ app.post("/api/ocr", async (req, res) => {
     console.error("[Backend OCR Logger] Server is missing GEMINI_API_KEY.");
     return res.json(buildOcrResponse({
       status: "error",
-      errorType: "MISSING_API_KEY",
-      errorMessage: "API key is not configured."
+      errorType: "MISSING_API_KEY"
     }));
   }
 
@@ -142,8 +149,7 @@ app.post("/api/ocr", async (req, res) => {
     if (!image || typeof image !== "string" || !image.trim()) {
       return res.json(buildOcrResponse({
         status: "error",
-        errorType: "EMPTY_IMAGE",
-        errorMessage: "No image content detected."
+        errorType: "EMPTY_IMAGE"
       }));
     }
 
@@ -159,6 +165,23 @@ app.post("/api/ocr", async (req, res) => {
       }
     }
 
+    // Validate MIME types
+    const allowedMimeTypes = ["image/png", "image/jpeg", "image/jpg", "image/webp", "image/heic", "image/heif"];
+    if (!allowedMimeTypes.includes(resolvedMimeType.toLowerCase())) {
+      return res.json(buildOcrResponse({
+        status: "error",
+        errorType: "UNSUPPORTED_FORMAT"
+      }));
+    }
+
+    // Check if image data is extremely short or doesn't have standard base64 pattern (meaning CORRUPT_IMAGE)
+    if (base64Data.length < 50) {
+      return res.json(buildOcrResponse({
+        status: "error",
+        errorType: "CORRUPT_IMAGE"
+      }));
+    }
+
     // Lazily get initialized Gemini client
     let ai;
     try {
@@ -166,49 +189,40 @@ app.post("/api/ocr", async (req, res) => {
     } catch (keyError: any) {
       return res.json(buildOcrResponse({
         status: "error",
-        errorType: "MISSING_API_KEY",
-        errorMessage: "API key is not configured."
+        errorType: "MISSING_API_KEY"
       }));
     }
 
-    const ocrPrompt = `You are a production-grade OCR + API response engine under the name SOLVIORA.
+    const ocrPrompt = `You are a production-grade OCR and calculation data provider.
+Convert images into clean structured JSON output.
 
-ABSOLUTE RULES:
-1. Always return ONLY valid JSON. No explanations, no markdown, no UI text.
-2. Never output partial JSON.
-3. Never output phrases like "analyzing", "processing", or debugging logs.
-4. Every response must strictly follow the schema below.
-5. Even on failure, return valid JSON (never plain text).
+ABSOLUTE RULES (NON-NEGOTIABLE):
+1. Output MUST be valid JSON only.
+2. NEVER output UI text, explanations, markdown, or logs.
+3. NEVER output button labels or user instructions.
+4. NEVER output partial JSON.
+5. NEVER return empty strings to represent meaning.
+6. The frontend handles ALL user messaging.
 
 OUTPUT SCHEMA (DO NOT CHANGE):
 {
-  "status": "success",
+  "status": "success" | "error",
   "error": {
-    "type": null,
-    "message": ""
+    "type": null | "EMPTY_IMAGE" | "LOW_QUALITY" | "CORRUPT_IMAGE" | "UNSUPPORTED_FORMAT" | "RATE_LIMIT" | "TIMEOUT" | "MISSING_API_KEY" | "INVALID_INPUT",
+    "code": 0
   },
   "data": {
     "extracted_text": "the extracted clean math, formula, science or standard text question exactly",
-    "problem_type": "math",
-    "confidence": 0.95
-  },
-  "retry": {
-    "enabled": true,
-    "attempts": 0,
-    "max_attempts": 3,
-    "delay_ms": 1000
+    "confidence": 0.95,
+    "problem_type": "math" | "text" | "unknown"
   }
 }
 
 FALLBACK AND CRITICAL ERROR RULES (If you fail or cannot parse):
-- If image has no content or is blank -> status = "error", error.type = "EMPTY_IMAGE", error.message = "No image content detected."
-- If text is unreadable or blurry -> status = "error", error.type = "LOW_QUALITY", error.message = "Image is unclear or unreadable."
-- If request inputs are invalid -> status = "error", error.type = "INVALID_INPUT", error.message = "Invalid request input."
-
-RETRY RULES:
-- Retry ONLY for TIMEOUT or RATE_LIMIT.
-- Maximum retries = 3.
-- Increase delay exponentially (1s → 2s → 4s).`;
+- If no visible content in image -> status = 'error', error.type = 'EMPTY_IMAGE', error.code = 1
+- If image is blurry / unreadable -> status = 'error', error.type = 'LOW_QUALITY', error.code = 2
+- If format not supported -> status = 'error', error.type = 'UNSUPPORTED_FORMAT', error.code = 4
+- If image decoding failure -> status = 'error', error.type = 'CORRUPT_IMAGE', error.code = 3`;
 
     const imagePart = {
       inlineData: {
@@ -238,14 +252,14 @@ RETRY RULES:
               properties: {
                 type: {
                   type: Type.STRING,
-                  description: "The specific error type if status is 'error', e.g. 'LOW_QUALITY', 'EMPTY_IMAGE'",
+                  description: "EMPTY_IMAGE, LOW_QUALITY, CORRUPT_IMAGE, UNSUPPORTED_FORMAT, RATE_LIMIT, TIMEOUT, MISSING_API_KEY, INVALID_INPUT, or null",
                 },
-                message: {
-                  type: Type.STRING,
-                  description: "Friendly description of failure or blank in success screen.",
+                code: {
+                  type: Type.INTEGER,
+                  description: "Error code number or 0 if success",
                 }
               },
-              required: ["type", "message"]
+              required: ["type", "code"]
             },
             data: {
               type: Type.OBJECT,
@@ -254,16 +268,16 @@ RETRY RULES:
                   type: Type.STRING,
                   description: "The exactly captured text/mathematical problem content.",
                 },
-                problem_type: {
-                  type: Type.STRING,
-                  description: "math, text, or unknown calculation representation.",
-                },
                 confidence: {
                   type: Type.NUMBER,
                   description: "A numeric float from 0.0 to 1.0 reflecting confidence.",
+                },
+                problem_type: {
+                  type: Type.STRING,
+                  description: "math, text, or unknown classification",
                 }
               },
-              required: ["extracted_text", "problem_type", "confidence"]
+              required: ["extracted_text", "confidence", "problem_type"]
             }
           },
           required: ["status", "error", "data"],
@@ -319,6 +333,15 @@ RETRY RULES:
     } catch (primaryErr: any) {
       console.error("[Backend OCR Logger] Primary structured generation failed:", primaryErr.message || primaryErr);
       
+      // If error message indicates image decode/corrupt or invalid format, maps to correct error
+      const lowerErr = (primaryErr.message || "").toLowerCase();
+      if (lowerErr.includes("decode") || lowerErr.includes("corrupt") || lowerErr.includes("malformed")) {
+        return res.json(buildOcrResponse({
+          status: "error",
+          errorType: "CORRUPT_IMAGE"
+        }));
+      }
+
       // Check if transient and retry
       if (isTransientError(primaryErr)) {
         console.warn("[Backend OCR Logger] Error is transient, retrying primary generation with simple backoff delay...");
@@ -354,8 +377,7 @@ RETRY RULES:
         console.error("[Backend OCR Logger] Fallback schema-free generation also failed:", fallbackErr.message || fallbackErr);
         return res.json(buildOcrResponse({
           status: "error",
-          errorType: "TIMEOUT",
-          errorMessage: "Request timed out or gateway not responding."
+          errorType: "TIMEOUT"
         }));
       }
     }
@@ -363,8 +385,7 @@ RETRY RULES:
     if (!textOutput || !textOutput.trim()) {
       return res.json(buildOcrResponse({
         status: "error",
-        errorType: "LOW_QUALITY",
-        errorMessage: "Image is unclear or unreadable."
+        errorType: "LOW_QUALITY"
       }));
     }
 
@@ -375,23 +396,20 @@ RETRY RULES:
     } catch (parseE) {
       return res.json(buildOcrResponse({
         status: "error",
-        errorType: "INVALID_INPUT",
-        errorMessage: "Model returned non-JSON response structure."
+        errorType: "LOW_QUALITY"
       }));
     }
 
     if (!parsedData) {
       return res.json(buildOcrResponse({
         status: "error",
-        errorType: "INVALID_INPUT",
-        errorMessage: "Could not parse valid mathematical data structure from the response."
+        errorType: "LOW_QUALITY"
       }));
     }
 
     // Safely reconstruct the exact data values 
     const statusVal = parsedData.status === "error" ? "error" : "success";
     const errorTypeVal = parsedData.status === "error" ? (parsedData.error?.type || parsedData.error_type || "LOW_QUALITY") : null;
-    const errorMessageVal = parsedData.error?.message || parsedData.message || (statusVal === "success" ? "OCR completed successfully." : "Unreadable image contents.");
     const extractedTextVal = parsedData.data?.extracted_text || parsedData.extractedText || "";
     const problemTypeVal = parsedData.data?.problem_type || parsedData.problem_type || "unknown";
     
@@ -413,21 +431,18 @@ RETRY RULES:
 
     return res.json(buildOcrResponse({
       status: statusVal,
-      errorType: errorTypeVal,
-      errorMessage: errorMessageVal,
+      errorType: errorTypeVal as any,
       extractedText: extractedTextVal,
-      problemType: problemTypeVal as any,
-      confidence: confidenceVal
+      confidence: confidenceVal,
+      problemType: problemTypeVal as any
     }));
 
   } catch (error: any) {
     console.error("OCR API failed on Server-Side:", error);
-    const errType = isTransientError(error) ? "RATE_LIMIT" : "INVALID_INPUT";
-    const errMsg = isTransientError(error) ? "Rate limit exceeded. Please retry later." : (error.message || "Invalid request input.");
+    const errType = isTransientError(error) ? "RATE_LIMIT" : "TIMEOUT";
     return res.json(buildOcrResponse({
       status: "error",
-      errorType: errType,
-      errorMessage: errMsg
+      errorType: errType
     }));
   }
 });

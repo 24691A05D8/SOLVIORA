@@ -512,19 +512,12 @@ export default function CameraScanner({
           data = {
             status: "error",
             error: {
-              type: "INVALID_INPUT",
-              message: "Model returned non-JSON response"
+              type: "LOW_QUALITY",
+              message: ""
             },
             data: {
               extracted_text: "",
-              problem_type: "unknown",
               confidence: 0
-            },
-            retry: {
-              enabled: true,
-              attempts: attempt,
-              max_attempts: maxRetries,
-              delay_ms: 1000
             }
           };
         }
@@ -545,9 +538,9 @@ export default function CameraScanner({
           
           setOcrConfidencePercent(scorePercent);
           setOcrConfidence(confidenceVal >= 0.70 ? "high" : "low");
-          setOcrConfidenceReason(data.error?.message || "Multimodal OCR pattern compiled successfully.");
+          setOcrConfidenceReason(`Multimodal OCR pattern completed successfully (Code: ${data.error?.code || 0}).`);
           
-          const isMathOrText = data.data?.problem_type === "math" || data.data?.problem_type === "text";
+          const isMathOrText = data.data?.problem_type === "math" || data.data?.problem_type === "text" || data.data?.problem_type === "unknown";
           setIsQuestion(isMathOrText);
 
           // Store to scan history automatically
@@ -566,27 +559,29 @@ export default function CameraScanner({
         // Handle error status inside response
         if (data.status === "error") {
           const errType = data.error?.type;
-          const errMsg = data.error?.message || "Unable to extract the question.";
-
-          let friendlyError = errMsg;
+          let friendlyError = "Unable to extract the question.";
+          
           switch (errType) {
             case "EMPTY_IMAGE":
-              friendlyError = "Empty image data: The captured image or cropped region is empty or has no pixel variance.";
+              friendlyError = "Empty image: No readable content detected.";
               break;
             case "LOW_QUALITY":
-              friendlyError = "OCR returned empty text: The text was completely unreadable, blurry, low-contrast, or contained no recognizable mathematical characters.";
+              friendlyError = "Image is unclear or unreadable.";
+              break;
+            case "CORRUPT_IMAGE":
+              friendlyError = "Error decoding image: The uploaded or captured screenshot file is corrupt.";
+              break;
+            case "UNSUPPORTED_FORMAT":
+              friendlyError = "Unsupported format: Only PNG, JPEG, WEBP, and HEIC/HEIF images are supported.";
               break;
             case "RATE_LIMIT":
-              friendlyError = "Rate limit exceeded: The backend service is currently throttled due to model high volume. Please retry in a few seconds.";
+              friendlyError = "Rate limit exceeded. Please retry later.";
               break;
             case "TIMEOUT":
-              friendlyError = "Network failure: A connection timeout occurred, or the gateway is unresponsive.";
+              friendlyError = "Request timed out or gateway not responding.";
               break;
             case "MISSING_API_KEY":
-              friendlyError = "Invalid API key: No Google Gemini API key configured in AI Studio Secrets manager.";
-              break;
-            case "INVALID_INPUT":
-              friendlyError = "Unsupported image format or corrupt input. Try another screenshot.";
+              friendlyError = "API key is not configured.";
               break;
           }
 
