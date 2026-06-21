@@ -21,6 +21,7 @@ import {
   Info
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
+import { validateOCR } from "../ocrValidator";
 
 interface CameraScannerProps {
   isDark: boolean;
@@ -507,24 +508,24 @@ export default function CameraScanner({
 
         let data: any;
         try {
-          data = JSON.parse(responseBodyText);
+          const rawParsed = JSON.parse(responseBodyText);
+          data = validateOCR(rawParsed);
         } catch (e) {
           data = {
             status: "error",
-            error: {
-              type: "LOW_QUALITY",
-              message: ""
-            },
+            error_code: 1008,
+            error_type: "INVALID_INPUT",
             data: {
-              extracted_text: "",
-              confidence: 0
+              text: "",
+              confidence: 0,
+              problem_type: "unknown"
             }
           };
         }
 
         // Handle success status
         if (data.status === "success") {
-          const extractedText = data.data?.extracted_text || "";
+          const extractedText = data.data?.text || data.data?.extracted_text || "";
           
           if (!extractedText.trim()) {
             throw new Error("OCR returned empty text: The text was completely unreadable, blurry, low-contrast, or contained no recognizable mathematical characters.");
@@ -538,7 +539,7 @@ export default function CameraScanner({
           
           setOcrConfidencePercent(scorePercent);
           setOcrConfidence(confidenceVal >= 0.70 ? "high" : "low");
-          setOcrConfidenceReason(`Multimodal OCR pattern completed successfully (Code: ${data.error?.code || 0}).`);
+          setOcrConfidenceReason(`Multimodal OCR pattern completed successfully (Code: ${data.error_code || 0}).`);
           
           const isMathOrText = data.data?.problem_type === "math" || data.data?.problem_type === "text" || data.data?.problem_type === "unknown";
           setIsQuestion(isMathOrText);
@@ -558,35 +559,51 @@ export default function CameraScanner({
 
         // Handle error status inside response
         if (data.status === "error") {
-          const errType = data.error?.type;
+          const errCode = data.error_code;
+          const errType = data.error_type || data.error?.type;
           let friendlyError = "Unable to extract the question.";
           
-          switch (errType) {
-            case "EMPTY_IMAGE":
+          switch (errCode) {
+            case 1001:
               friendlyError = "Empty image: No readable content detected.";
               break;
-            case "LOW_QUALITY":
+            case 1002:
               friendlyError = "Image is unclear or unreadable.";
               break;
-            case "CORRUPT_IMAGE":
+            case 1003:
               friendlyError = "Error decoding image: The uploaded or captured screenshot file is corrupt.";
               break;
-            case "UNSUPPORTED_FORMAT":
+            case 1004:
               friendlyError = "Unsupported format: Only PNG, JPEG, WEBP, and HEIC/HEIF images are supported.";
               break;
-            case "RATE_LIMIT":
+            case 1005:
               friendlyError = "Rate limit exceeded. Please retry later.";
               break;
-            case "TIMEOUT":
+            case 1006:
               friendlyError = "Request timed out or gateway not responding.";
               break;
-            case "MISSING_API_KEY":
+            case 1007:
               friendlyError = "API key is not configured.";
+              break;
+            case 1008:
+              friendlyError = "Unsupported image format or corrupt input. Try another screenshot.";
+              break;
+            default:
+              switch (errType) {
+                case "EMPTY_IMAGE": friendlyError = "Empty image: No readable content detected."; break;
+                case "LOW_QUALITY": friendlyError = "Image is unclear or unreadable."; break;
+                case "CORRUPT_IMAGE": friendlyError = "Error decoding image: The uploaded or captured screenshot file is corrupt."; break;
+                case "UNSUPPORTED_FORMAT": friendlyError = "Unsupported format: Only PNG, JPEG, WEBP, and HEIC/HEIF images are supported."; break;
+                case "RATE_LIMIT": friendlyError = "Rate limit exceeded. Please retry later."; break;
+                case "TIMEOUT": friendlyError = "Request timed out or gateway not responding."; break;
+                case "MISSING_API_KEY": friendlyError = "API key is not configured."; break;
+                case "INVALID_INPUT": friendlyError = "Unsupported image format or corrupt input. Try another screenshot."; break;
+              }
               break;
           }
 
           // Retry ONLY for TIMEOUT or RATE_LIMIT
-          if (errType === "TIMEOUT" || errType === "RATE_LIMIT") {
+          if (errCode === 1006 || errCode === 1005 || errType === "TIMEOUT" || errType === "RATE_LIMIT") {
             lastErr = new Error(friendlyError);
             attempt++;
             continue; // Go to next attempt

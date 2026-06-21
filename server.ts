@@ -25,6 +25,7 @@ import path from "path";
 import dotenv from "dotenv";
 import { GoogleGenAI, Type } from "@google/genai";
 import { createServer as createViteServer } from "vite";
+import { validateOCR } from "./src/ocrValidator";
 
 // Load environment variables from .env file (for local development)
 dotenv.config();
@@ -109,29 +110,27 @@ app.post("/api/ocr", async (req, res) => {
     let errorCodeVal = opt.errorCode || 0;
     if (opt.status === "error" && !errorCodeVal) {
       switch (opt.errorType) {
-        case "EMPTY_IMAGE": errorCodeVal = 1; break;
-        case "LOW_QUALITY": errorCodeVal = 2; break;
-        case "CORRUPT_IMAGE": errorCodeVal = 3; break;
-        case "UNSUPPORTED_FORMAT": errorCodeVal = 4; break;
-        case "RATE_LIMIT": errorCodeVal = 5; break;
-        case "TIMEOUT": errorCodeVal = 6; break;
-        case "MISSING_API_KEY": errorCodeVal = 7; break;
-        case "INVALID_INPUT": errorCodeVal = 8; break;
-        default: errorCodeVal = 9; break;
+        case "EMPTY_IMAGE": errorCodeVal = 1001; break;
+        case "LOW_QUALITY": errorCodeVal = 1002; break;
+        case "CORRUPT_IMAGE": errorCodeVal = 1003; break;
+        case "UNSUPPORTED_FORMAT": errorCodeVal = 1004; break;
+        case "RATE_LIMIT": errorCodeVal = 1005; break;
+        case "TIMEOUT": errorCodeVal = 1006; break;
+        case "MISSING_API_KEY": errorCodeVal = 1007; break;
+        case "INVALID_INPUT": errorCodeVal = 1008; break;
+        default: errorCodeVal = 1008; break;
       }
     }
-    return {
+    return validateOCR({
       status: opt.status,
-      error: {
-        type: opt.errorType || null,
-        code: errorCodeVal
-      },
+      error_code: errorCodeVal,
+      error_type: opt.errorType || null,
       data: {
-        extracted_text: opt.extractedText || "",
+        text: opt.extractedText || "",
         confidence: typeof opt.confidence === "number" ? opt.confidence : (opt.status === "success" ? 0.95 : 0.0),
         problem_type: opt.problemType || "unknown"
       }
-    };
+    });
   };
 
   // Check API Key first as specified
@@ -207,22 +206,20 @@ ABSOLUTE RULES (NON-NEGOTIABLE):
 OUTPUT SCHEMA (DO NOT CHANGE):
 {
   "status": "success" | "error",
-  "error": {
-    "type": null | "EMPTY_IMAGE" | "LOW_QUALITY" | "CORRUPT_IMAGE" | "UNSUPPORTED_FORMAT" | "RATE_LIMIT" | "TIMEOUT" | "MISSING_API_KEY" | "INVALID_INPUT",
-    "code": 0
-  },
+  "error_code": 0,
+  "error_type": null | "EMPTY_IMAGE" | "LOW_QUALITY" | "CORRUPT_IMAGE" | "UNSUPPORTED_FORMAT" | "RATE_LIMIT" | "TIMEOUT" | "MISSING_API_KEY" | "INVALID_INPUT",
   "data": {
-    "extracted_text": "the extracted clean math, formula, science or standard text question exactly",
+    "text": "the extracted clean math, formula, science or standard text question exactly",
     "confidence": 0.95,
     "problem_type": "math" | "text" | "unknown"
   }
 }
 
 FALLBACK AND CRITICAL ERROR RULES (If you fail or cannot parse):
-- If no visible content in image -> status = 'error', error.type = 'EMPTY_IMAGE', error.code = 1
-- If image is blurry / unreadable -> status = 'error', error.type = 'LOW_QUALITY', error.code = 2
-- If format not supported -> status = 'error', error.type = 'UNSUPPORTED_FORMAT', error.code = 4
-- If image decoding failure -> status = 'error', error.type = 'CORRUPT_IMAGE', error.code = 3`;
+- If no visible content in image -> status = 'error', error_type = 'EMPTY_IMAGE', error_code = 1001
+- If image is blurry / unreadable -> status = 'error', error_type = 'LOW_QUALITY', error_code = 1002
+- If format not supported -> status = 'error', error_type = 'UNSUPPORTED_FORMAT', error_code = 1004
+- If image decoding failure -> status = 'error', error_type = 'CORRUPT_IMAGE', error_code = 1003`;
 
     const imagePart = {
       inlineData: {
@@ -247,24 +244,18 @@ FALLBACK AND CRITICAL ERROR RULES (If you fail or cannot parse):
               type: Type.STRING,
               description: "Status containing success or error",
             },
-            error: {
-              type: Type.OBJECT,
-              properties: {
-                type: {
-                  type: Type.STRING,
-                  description: "EMPTY_IMAGE, LOW_QUALITY, CORRUPT_IMAGE, UNSUPPORTED_FORMAT, RATE_LIMIT, TIMEOUT, MISSING_API_KEY, INVALID_INPUT, or null",
-                },
-                code: {
-                  type: Type.INTEGER,
-                  description: "Error code number or 0 if success",
-                }
-              },
-              required: ["type", "code"]
+            error_code: {
+              type: Type.INTEGER,
+              description: "Error code number, 0 for success",
+            },
+            error_type: {
+              type: Type.STRING,
+              description: "EMPTY_IMAGE, LOW_QUALITY, CORRUPT_IMAGE, UNSUPPORTED_FORMAT, RATE_LIMIT, TIMEOUT, MISSING_API_KEY, INVALID_INPUT, or null if status is success",
             },
             data: {
               type: Type.OBJECT,
               properties: {
-                extracted_text: {
+                text: {
                   type: Type.STRING,
                   description: "The exactly captured text/mathematical problem content.",
                 },
@@ -277,10 +268,10 @@ FALLBACK AND CRITICAL ERROR RULES (If you fail or cannot parse):
                   description: "math, text, or unknown classification",
                 }
               },
-              required: ["extracted_text", "confidence", "problem_type"]
+              required: ["text", "confidence", "problem_type"]
             }
           },
-          required: ["status", "error", "data"],
+          required: ["status", "error_code", "error_type", "data"],
         },
       },
     };
@@ -409,8 +400,8 @@ FALLBACK AND CRITICAL ERROR RULES (If you fail or cannot parse):
 
     // Safely reconstruct the exact data values 
     const statusVal = parsedData.status === "error" ? "error" : "success";
-    const errorTypeVal = parsedData.status === "error" ? (parsedData.error?.type || parsedData.error_type || "LOW_QUALITY") : null;
-    const extractedTextVal = parsedData.data?.extracted_text || parsedData.extractedText || "";
+    const errorTypeVal = parsedData.status === "error" ? (parsedData.error_type || parsedData.error?.type || parsedData.errorType || "LOW_QUALITY") : null;
+    const extractedTextVal = parsedData.data?.text || parsedData.data?.extracted_text || parsedData.extractedText || "";
     const problemTypeVal = parsedData.data?.problem_type || parsedData.problem_type || "unknown";
     
     let confidenceVal = 0.0;
