@@ -87,6 +87,25 @@ export default function CameraScanner({
   // Notice Banner Popup states
   const [isCopied, setIsCopied] = useState(false);
   
+  // Dynamic Loading Text state for OCR
+  const [loadingText, setLoadingText] = useState("Analyzing image...");
+
+  useEffect(() => {
+    if (!isOcrProcessing) return;
+    const texts = [
+      "Analyzing image...",
+      "Detecting text...",
+      "Recognizing mathematical expressions..."
+    ];
+    let currentIndex = 0;
+    setLoadingText(texts[0]);
+    const interval = setInterval(() => {
+      currentIndex = (currentIndex + 1) % texts.length;
+      setLoadingText(texts[currentIndex]);
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [isOcrProcessing]);
+  
   // Refs
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -377,85 +396,161 @@ export default function CameraScanner({
     setOcrConfidencePercent(null);
     setIsDeveloperDetailsExp(false);
     
-    try {
-      const response = await fetch("/api/ocr", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          image: imageB64,
-          mimeType: "image/png"
-        }),
-      });
+    const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+    
+    let attempt = 0;
+    const maxRetries = 2; // up to 2 retries (total 3 attempts)
+    let finalResponse: Response | null = null;
+    let fallbackText: string | null = null;
+    let customFriendlyMsg: string | null = null;
+    let lastErr: any = null;
 
-      const contentType = response.headers.get("content-type") || "";
-      if (contentType.includes("text/html")) {
-        const htmlText = await response.text();
-        console.error("OCR API responded with HTML payload instead of JSON:", htmlText.substring(0, 400));
-        throw new Error("HTML_RESPONSE|" + htmlText);
-      }
-
-      if (!response.ok) {
-        const errPayload = await response.json().catch(() => ({ error: "Server returned structured error." }));
-        throw new Error(errPayload.error || `HTTP error ${response.status}`);
-      }
-
-      const data = await response.json();
-      if (data.success) {
-        setExtractedResult(data.extractedText || "");
-        
-        // Calculate deterministic score percent inside range targets based on text
-        const textLen = (data.extractedText || "").length;
-        const offset = textLen % 5; // offset 0-4 for dynamism
-        
-        let initialPercent = 94 + offset; // default high
-        if (data.confidence === "low") {
-          initialPercent = 42 + offset;
-        } else if (data.confidence === "medium") {
-          initialPercent = 75 + offset;
+    while (attempt <= maxRetries) {
+      try {
+        if (attempt > 0) {
+          await sleep(2000); // 2-second delay between retrying
         }
 
-        // Clip maximum levels to 99%
-        const score = Math.max(10, Math.min(99, initialPercent));
-        
-        setOcrConfidence(data.confidence);
-        setOcrConfidencePercent(score);
-        setOcrConfidenceReason(data.confidenceReason || "Multimodal OCR pattern compiled successfully.");
-        setIsQuestion(data.isQuestion !== false);
-
-        // Store to scan history automatically
-        saveScanToHistory({
-          id: Date.now().toString(),
-          imagePreview: imageB64,
-          extractedText: data.extractedText || "",
-          confidence: data.confidence || "high",
-          timestamp: Date.now(),
+        const response = await fetch("/api/ocr", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            image: imageB64,
+            mimeType: "image/png"
+          }),
         });
-      } else {
-        throw new Error(data.error || "Failed to extract clean readable question.");
+
+        const contentType = response.headers.get("content-type") || "";
+
+        // Verification step 1: Check response.ok before parsing
+        if (!response.ok) {
+          // If response is HTML or any non-JSON format, do not call response.json()
+          if (!contentType.includes("application/json")) {
+            const rawBody = await response.text().catch(() => "");
+            fallbackText = rawBody;
+            console.error(`[Silent Tech Logger] Non-JSON error body (HTTP ${response.status}):`, rawBody.substring(0, 400));
+          } else {
+            const errPayload = await response.json().catch(() => ({}));
+            fallbackText = JSON.stringify(errPayload);
+            if (errPayload.error) {
+              throw new Error(errPayload.error);
+            }
+          }
+
+          // Handle HTTP Statuses
+          if (response.status === 400) {
+            customFriendlyMsg = "⚠️ The OCR service received an invalid request format. Please try again.";
+          } else if (response.status === 401) {
+            customFriendlyMsg = "⚠️ Unauthorized access to the OCR service. Contact administration.";
+          } else if (response.status === 403) {
+            customFriendlyMsg = "⚠️ Forbidden request. Your access is restricted.";
+          } else if (response.status === 404) {
+            customFriendlyMsg = "⚠️ The OCR service endpoint was not found on the server.";
+          } else if (response.status === 429) {
+            customFriendlyMsg = "⚠️ OCR rate limiting exceeded. Please wait a moment and try again.";
+          } else if (response.status >= 500) {
+            customFriendlyMsg = "⚠️ The server encountered an internal error. Please try again.";
+          } else {
+            customFriendlyMsg = `⚠️ The OCR service returned an unexpected response (Error ${response.status}).`;
+          }
+
+          throw new Error(customFriendlyMsg);
+        }
+
+        // Verification step 2: Verify that Content-Type contains "application/json"
+        if (!contentType.includes("application/json")) {
+          const rawText = await response.text().catch(() => "");
+          fallbackText = rawText;
+          throw new Error("⚠️ The OCR service responded with an invalid format. Please try again.");
+        }
+
+        // Successfully received and verified json response
+        finalResponse = response;
+        break;
+
+      } catch (err: any) {
+        lastErr = err;
+        console.warn(`[OCR Retry System] Attempt ${attempt + 1}/${maxRetries + 1} encountered an issue:`, err.message || err);
+        attempt++;
       }
-    } catch (err: any) {
-      console.error("[Silent Tech Logger] OCR API Failure details:", err);
+    }
+
+    // Now process final outcome
+    if (finalResponse) {
+      try {
+        const data = await finalResponse.json();
+        if (data.success) {
+          setExtractedResult(data.extractedText || "");
+          
+          // Calculate deterministic score percent inside range targets based on text
+          const textLen = (data.extractedText || "").length;
+          const offset = textLen % 5; // offset 0-4 for dynamism
+          
+          let initialPercent = 94 + offset; // default high
+          if (data.confidence === "low") {
+            initialPercent = 42 + offset;
+          } else if (data.confidence === "medium") {
+            initialPercent = 75 + offset;
+          }
+
+          // Clip maximum levels to 99%
+          const score = Math.max(10, Math.min(99, initialPercent));
+          
+          setOcrConfidence(data.confidence);
+          setOcrConfidencePercent(score);
+          setOcrConfidenceReason(data.confidenceReason || "Multimodal OCR pattern compiled successfully.");
+          setIsQuestion(data.isQuestion !== false);
+
+          // Store to scan history automatically
+          saveScanToHistory({
+            id: Date.now().toString(),
+            imagePreview: imageB64,
+            extractedText: data.extractedText || "",
+            confidence: data.confidence || "high",
+            timestamp: Date.now(),
+          });
+        } else {
+          throw new Error(data.error || "Failed to extract clean readable question.");
+        }
+      } catch (parseErr: any) {
+        console.error("[Silent Tech Logger] Success payload parsing failed:", parseErr);
+        setOcrError("⚠️ The OCR service is temporarily unavailable. Please try again.");
+        setTechnicalErrorDetails(parseErr.stack || parseErr.toString());
+      } finally {
+        setIsOcrProcessing(false);
+      }
+    } else {
+      // Extracted retries fully exhausted
+      const rawErrorStr = lastErr?.message || lastErr?.toString() || "Connection timeout";
+      console.error("[Silent Tech Logger] OCR failure after exhausted retries:", rawErrorStr);
       
-      let friendlyMessage = "Unable to extract the question.";
-      const rawErrorStr = err.message || err.toString();
-      
-      // Silence raw developer exceptions like HTML returns or Unexpected tokens to users
-      if (
+      let finalFriendlyMsg = "⚠️ The OCR service is temporarily unavailable. Please try again.";
+      if (customFriendlyMsg) {
+        finalFriendlyMsg = customFriendlyMsg;
+      } else if (
         rawErrorStr.includes("HTML_RESPONSE") || 
         rawErrorStr.includes("Unexpected token") || 
         rawErrorStr.includes("doctype") ||
-        rawErrorStr.includes("<!doctype")
+        rawErrorStr.includes("<!doctype") ||
+        rawErrorStr.includes("SyntaxError") ||
+        rawErrorStr.includes("JSON.parse")
       ) {
-        friendlyMessage = "⚠️ The OCR service is temporarily unavailable. Please try again in a few moments.";
+        finalFriendlyMsg = "⚠️ The OCR service is temporarily unavailable. Please try again.";
+      } else if (rawErrorStr.includes("Failed to fetch") || rawErrorStr.includes("network") || rawErrorStr.includes("Network")) {
+        finalFriendlyMsg = "⚠️ A connection timeout or network failure occurred. Please check your internet connection.";
       } else {
-        friendlyMessage = "Unable to extract the question.";
+        finalFriendlyMsg = rawErrorStr;
       }
-      
-      setOcrError(friendlyMessage);
-      setTechnicalErrorDetails(err.stack || rawErrorStr);
-    } finally {
+
+      setOcrError(finalFriendlyMsg);
+      // Hide raw backend errors from users, logging them securely to the state for developers inside expandable details
+      setTechnicalErrorDetails(
+        fallbackText 
+          ? `[API Response Raw]: ${fallbackText.substring(0, 1000)}` 
+          : (lastErr?.stack || rawErrorStr)
+      );
       setIsOcrProcessing(false);
     }
   };
@@ -927,7 +1022,7 @@ export default function CameraScanner({
                     </div>
 
                     <h4 className="font-extrabold text-sm uppercase tracking-wider mb-2 text-indigo-400 animate-pulse">
-                      Analyzing image and extracting question...
+                      {loadingText}
                     </h4>
                     <p className="text-xs max-w-sm text-slate-400 leading-normal">
                       Reading printing typography, mathematical curves, logic structures and handwriting arrays. Processing values securely on server.
