@@ -34,7 +34,16 @@ const app = express();
 const PORT = 3000;
 
 // Enable JSON parsing middleware to handle incoming requests with JSON bodies.
-app.use(express.json());
+app.use(express.json({
+  limit: "20mb",
+}) as any);
+
+app.use(express.urlencoded({
+  extended: true,
+  limit: "20mb",
+}) as any);
+
+
 
 /**
  * --- LAZY INITIALIZATION OF CLIENT SIDE SDK ---
