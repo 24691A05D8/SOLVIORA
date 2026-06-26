@@ -45,6 +45,140 @@ const detectMathSymbols = (text: string): string[] => {
   return Array.from(new Set(matches)); // uniquely deduped list
 };
 
+/**
+ * Optimizes an image (file or base64 data URL) by:
+ * 1. Resizing so max(width, height) <= 1280 while maintaining aspect ratio.
+ * 2. Compressing to JPEG starting at 80% quality.
+ * 3. Reducing quality down to 50% if the size exceeds 1 MB.
+ * 4. Utilizing modern browser APIs like createImageBitmap / OffscreenCanvas where supported.
+ */
+const optimizeImage = async (imageSrc: File | string): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const handleImageLoaded = async (img: HTMLImageElement | ImageBitmap) => {
+      try {
+        const originalWidth = img.width;
+        const originalHeight = img.height;
+        
+        let targetWidth = originalWidth;
+        let targetHeight = originalHeight;
+        const maxDim = 1280;
+        
+        if (originalWidth > maxDim || originalHeight > maxDim) {
+          if (originalWidth > originalHeight) {
+            targetWidth = maxDim;
+            targetHeight = Math.round((originalHeight * maxDim) / originalWidth);
+          } else {
+            targetHeight = maxDim;
+            targetWidth = Math.round((originalWidth * maxDim) / originalHeight);
+          }
+        }
+        
+        // Use OffscreenCanvas if supported, otherwise standard canvas
+        let canvas: HTMLCanvasElement | OffscreenCanvas;
+        let ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null = null;
+        
+        if (typeof OffscreenCanvas !== "undefined") {
+          try {
+            canvas = new OffscreenCanvas(targetWidth, targetHeight);
+            ctx = canvas.getContext("2d");
+          } catch (e) {
+            const htmlCanvas = document.createElement("canvas");
+            htmlCanvas.width = targetWidth;
+            htmlCanvas.height = targetHeight;
+            canvas = htmlCanvas;
+            ctx = htmlCanvas.getContext("2d");
+          }
+        } else {
+          const htmlCanvas = document.createElement("canvas");
+          htmlCanvas.width = targetWidth;
+          htmlCanvas.height = targetHeight;
+          canvas = htmlCanvas;
+          ctx = htmlCanvas.getContext("2d");
+        }
+        
+        if (!ctx) {
+          throw new Error("Failed to obtain 2D canvas context for optimization");
+        }
+        
+        // Draw image onto canvas
+        ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+        
+        let quality = 0.8;
+        let finalDataUrl = "";
+        let isUnderLimit = false;
+        
+        if (typeof OffscreenCanvas !== "undefined" && canvas instanceof OffscreenCanvas) {
+          while (!isUnderLimit && quality >= 0.5) {
+            const blob = await canvas.convertToBlob({ type: "image/jpeg", quality });
+            if (blob.size < 1024 * 1024 || quality <= 0.5) {
+              isUnderLimit = true;
+              finalDataUrl = await new Promise<string>((res, rej) => {
+                const r = new FileReader();
+                r.onload = () => res(r.result as string);
+                r.onerror = () => rej(r.error);
+                r.readAsDataURL(blob);
+              });
+            } else {
+              quality -= 0.05;
+            }
+          }
+        } else if (canvas instanceof HTMLCanvasElement) {
+          while (!isUnderLimit && quality >= 0.5) {
+            finalDataUrl = canvas.toDataURL("image/jpeg", quality);
+            // approximate size: (base64 length * 3/4)
+            const approxSize = (finalDataUrl.length - 22) * 3 / 4;
+            if (approxSize < 1024 * 1024 || quality <= 0.5) {
+              isUnderLimit = true;
+            } else {
+              quality -= 0.05;
+            }
+          }
+        }
+        
+        // Cleanup if it was an ImageBitmap
+        if ("close" in img) {
+          img.close();
+        }
+        
+        resolve(finalDataUrl);
+      } catch (err) {
+        reject(err);
+      }
+    };
+    
+    // Check if createImageBitmap is supported and if imageSrc is a File
+    if (typeof createImageBitmap !== "undefined" && imageSrc instanceof File) {
+      createImageBitmap(imageSrc)
+        .then(handleImageLoaded)
+        .catch(() => {
+          fallbackToStandardImage(imageSrc);
+        });
+    } else {
+      fallbackToStandardImage(imageSrc);
+    }
+    
+    function fallbackToStandardImage(src: string | File) {
+      const img = new Image();
+      img.onload = () => {
+        handleImageLoaded(img);
+      };
+      img.onerror = () => {
+        reject(new Error("Failed to load image element for optimization"));
+      };
+      if (typeof src === "string") {
+        img.src = src;
+      } else {
+        const url = URL.createObjectURL(src);
+        img.onload = () => {
+          URL.revokeObjectURL(url);
+          handleImageLoaded(img);
+        };
+        img.src = url;
+      }
+    }
+  });
+};
+
 export default function CameraScanner({
   isDark,
   onTextScanned,
@@ -206,7 +340,7 @@ export default function CameraScanner({
   };
 
   // Capture Photo
-  const capturePhoto = () => {
+  const capturePhoto = async () => {
     if (!videoRef.current) return;
     const canvas = document.createElement("canvas");
     canvas.width = videoRef.current.videoWidth || 1280;
@@ -216,10 +350,21 @@ export default function CameraScanner({
     if (ctx) {
       ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
       const dataUrl = canvas.toDataURL("image/png");
-      setSourceImage(dataUrl);
-      setCroppedImage(dataUrl); // Default cropped to full image first
-      stopCamera();
-      setIsCropping(true); // Direct to crop view
+      
+      try {
+        const optimizedUrl = await optimizeImage(dataUrl);
+        setSourceImage(optimizedUrl);
+        setCroppedImage(optimizedUrl); // Default cropped to full image first
+        stopCamera();
+        setIsCropping(true); // Direct to crop view
+      } catch (err: any) {
+        console.error("Failed to optimize captured photo:", err);
+        // Fallback to original captured image
+        setSourceImage(dataUrl);
+        setCroppedImage(dataUrl);
+        stopCamera();
+        setIsCropping(true);
+      }
     }
   };
 
@@ -231,22 +376,31 @@ export default function CameraScanner({
     }
   };
 
-  const processFile = (file: File) => {
+  const processFile = async (file: File) => {
     if (!file.type.startsWith("image/")) {
       setOcrError("Please upload a valid image file (PNG, JPEG, WEBP)");
       return;
     }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const base64 = reader.result as string;
-      setSourceImage(base64);
-      setCroppedImage(base64);
+    try {
+      const optimizedUrl = await optimizeImage(file);
+      setSourceImage(optimizedUrl);
+      setCroppedImage(optimizedUrl);
       setIsCropping(true); // Let user adjust crop frame for uploaded image too
-    };
-    reader.onerror = () => {
-      setOcrError("Failed to read the uploaded image file.");
-    };
-    reader.readAsDataURL(file);
+    } catch (err: any) {
+      console.error("Failed to optimize uploaded file:", err);
+      // Fallback to standard reader
+      const reader = new FileReader();
+      reader.onload = () => {
+        const base64 = reader.result as string;
+        setSourceImage(base64);
+        setCroppedImage(base64);
+        setIsCropping(true);
+      };
+      reader.onerror = () => {
+        setOcrError("Failed to read the uploaded image file.");
+      };
+      reader.readAsDataURL(file);
+    }
   };
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -372,9 +526,20 @@ export default function CameraScanner({
       if (ctx) {
         ctx.drawImage(img, pxX, pxY, pxW, pxH, 0, 0, pxW, pxH);
         const base64cropped = canvas.toDataURL("image/png");
-        setCroppedImage(base64cropped);
-        setIsCropping(false); // Staging
-        triggerOcr(base64cropped);
+        
+        optimizeImage(base64cropped)
+          .then((optimizedCropped) => {
+            setCroppedImage(optimizedCropped);
+            setIsCropping(false); // Staging
+            triggerOcr(optimizedCropped);
+          })
+          .catch((err) => {
+            console.error("Failed to optimize cropped image:", err);
+            // Fallback to unoptimized cropped image
+            setCroppedImage(base64cropped);
+            setIsCropping(false);
+            triggerOcr(base64cropped);
+          });
       }
     };
     img.src = sourceImage;
