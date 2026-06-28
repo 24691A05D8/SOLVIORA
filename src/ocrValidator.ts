@@ -10,6 +10,7 @@ export function validateOCR(data: any) {
   }
 
   const isSuccess = data.status === "success";
+  const questionsList = Array.isArray(data?.data?.questions) ? data.data.questions : null;
 
   return {
     status: isSuccess ? "success" : "error",
@@ -20,7 +21,8 @@ export function validateOCR(data: any) {
       confidence: typeof data?.data?.confidence === "number" ? data.data.confidence : (isSuccess ? 0.95 : 0.0),
       problem_type: (data?.data?.problem_type === "math" || data?.data?.problem_type === "text" || data?.data?.problem_type === "unknown") 
         ? data.data.problem_type 
-        : "unknown"
+        : "unknown",
+      ...(questionsList ? { questions: questionsList } : {})
     }
   };
 }
@@ -129,6 +131,10 @@ export function hardParser(rawText: string): any {
     : (status === "success" ? 0.95 : 0.0);
 
   const problemTypeVal = parsed.data?.problem_type ?? parsed.problem_type ?? "unknown";
+  
+  const questionsList = Array.isArray(parsed?.data?.questions) 
+    ? parsed.data.questions 
+    : (Array.isArray(parsed?.questions) ? parsed.questions : undefined);
 
   return {
     status,
@@ -137,7 +143,8 @@ export function hardParser(rawText: string): any {
     data: {
       text: innerText,
       confidence: confidenceVal,
-      problem_type: problemTypeVal
+      problem_type: problemTypeVal,
+      ...(questionsList ? { questions: questionsList } : {})
     }
   };
 }

@@ -218,11 +218,28 @@ OUTPUT SCHEMA (DO NOT CHANGE):
   "error_code": 0,
   "error_type": null | "EMPTY_IMAGE" | "LOW_QUALITY" | "CORRUPT_IMAGE" | "UNSUPPORTED_FORMAT" | "RATE_LIMIT" | "TIMEOUT" | "MISSING_API_KEY" | "INVALID_INPUT",
   "data": {
-    "text": "the extracted clean math, formula, science or standard text question exactly",
+    "text": "the extracted clean math, formula, science or standard text in the full image",
     "confidence": 0.95,
-    "problem_type": "math" | "text" | "unknown"
+    "problem_type": "math" | "text" | "unknown",
+    "questions": [
+      {
+        "id": "q1",
+        "text": "the exact text of this specific question/problem",
+        "box": {
+          "ymin": 10,
+          "xmin": 5,
+          "ymax": 35,
+          "xmax": 95
+        }
+      }
+    ]
   }
 }
+
+DIRECTIONS FOR QUESTION REGIONS:
+- If there is only one question / mathematical equation in the image, output a single question element in "questions" representing the full question, estimating its bounding box (use 0, 0, 100, 100 or actual coordinate bounds if it occupies part of the image).
+- If there are multiple separate questions or math equations / calculations visible in the image, identify each distinct question as a separate element in "questions" with its own text, a unique id (q1, q2, etc.), and its exact bounding box (ymin, xmin, ymax, xmax coordinates relative to the full image size from 0 to 100).
+- If the image is blurry, low-contrast, unreadable, or doesn't have a clear readable text question, set status="error", error_type="LOW_QUALITY", error_code=1002, and questions=[]
 
 FALLBACK AND CRITICAL ERROR RULES (If you fail or cannot parse):
 - If no visible content in image -> status = 'error', error_type = 'EMPTY_IMAGE', error_code = 1001
@@ -275,6 +292,35 @@ FALLBACK AND CRITICAL ERROR RULES (If you fail or cannot parse):
                 problem_type: {
                   type: Type.STRING,
                   description: "math, text, or unknown classification",
+                },
+                questions: {
+                  type: Type.ARRAY,
+                  description: "List of detected distinct question/problem regions in the image.",
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      id: {
+                        type: Type.STRING,
+                        description: "Unique string ID for this question (e.g. q1, q2, ...)"
+                      },
+                      text: {
+                        type: Type.STRING,
+                        description: "The exact extracted text of this specific question region."
+                      },
+                      box: {
+                        type: Type.OBJECT,
+                        description: "Normalized coordinate bounding box of the question in percentages relative to image size, from 0 to 100",
+                        properties: {
+                          ymin: { type: Type.NUMBER, description: "Top Y coordinate percentage (0-100)" },
+                          xmin: { type: Type.NUMBER, description: "Left X coordinate percentage (0-100)" },
+                          ymax: { type: Type.NUMBER, description: "Bottom Y coordinate percentage (0-100)" },
+                          xmax: { type: Type.NUMBER, description: "Right X coordinate percentage (0-100)" }
+                        },
+                        required: ["ymin", "xmin", "ymax", "xmax"]
+                      }
+                    },
+                    required: ["id", "text", "box"]
+                  }
                 }
               },
               required: ["text", "confidence", "problem_type"]

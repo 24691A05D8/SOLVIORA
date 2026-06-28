@@ -191,6 +191,7 @@ export default function CameraScanner({
   // Media / Stream States
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const [cameraNotice, setCameraNotice] = useState<string | null>(null);
   const [facingMode, setFacingMode] = useState<"environment" | "user">("environment");
   
   // Image Loading / Crop States
@@ -211,6 +212,12 @@ export default function CameraScanner({
   const [ocrConfidencePercent, setOcrConfidencePercent] = useState<number | null>(null);
   const [ocrConfidenceReason, setOcrConfidenceReason] = useState<string>("");
   const [isQuestion, setIsQuestion] = useState(true);
+  const [detectedQuestions, setDetectedQuestions] = useState<{
+    id: string;
+    text: string;
+    box: { ymin: number; xmin: number; ymax: number; xmax: number };
+  }[]>([]);
+  const [selectedQuestionId, setSelectedQuestionId] = useState<string | null>(null);
 
   // Error diagnostic modules
   const [technicalErrorDetails, setTechnicalErrorDetails] = useState<string | null>(null);
@@ -291,28 +298,104 @@ export default function CameraScanner({
   // Start Camera Stream
   const startCamera = async () => {
     setCameraError(null);
+    setCameraNotice(null);
     if (stream) {
       stopCamera();
     }
+
+    const isPreviewEnv = typeof window !== "undefined" && (
+      window.self !== window.top ||
+      window.location.hostname.includes("ai.studio") ||
+      (window.location.hostname.includes("run.app") && !navigator?.mediaDevices)
+    );
+
+    // 1. Unsupported Browser/Context check
+    if (typeof navigator === "undefined" || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      console.warn("Camera mediaDevices API is not supported in this browser context.");
+      const unsupportedMsg = "Your browser or device context does not support live camera access. Please use the File Upload option instead.";
+      
+      if (isPreviewEnv) {
+        setActiveTab("upload");
+        setCameraNotice("Live camera access is not supported or is blocked in this preview iframe. Switched to File Upload.");
+      } else {
+        setCameraError(unsupportedMsg);
+      }
+      return;
+    }
+
     try {
-      const constraints = {
-        video: {
-          facingMode: facingMode,
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        },
-        audio: false
-      };
-      const mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+      // Safely query permission if browser supports permissions API
+      if (navigator.permissions && navigator.permissions.query) {
+        try {
+          const status = await navigator.permissions.query({ name: 'camera' as any });
+          console.log("Current camera permission status:", status.state);
+        } catch (pErr) {
+          console.warn("Permissions query failed safely:", pErr);
+        }
+      }
+
+      // 2. Request camera permission and open camera with progressive constraints
+      let mediaStream: MediaStream;
+      try {
+        const constraints = {
+          video: {
+            facingMode: { ideal: facingMode },
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          },
+          audio: false
+        };
+        mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (err) {
+        console.warn("Standard video constraints failed, trying with relaxed facingMode constraint:", err);
+        try {
+          const relaxedConstraints = {
+            video: {
+              facingMode: { ideal: facingMode }
+            },
+            audio: false
+          };
+          mediaStream = await navigator.mediaDevices.getUserMedia(relaxedConstraints);
+        } catch (err2) {
+          console.warn("Relaxed video constraints failed, trying simple video constraint:", err2);
+          // Pure fallback to any available video track
+          mediaStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        }
+      }
+
       setStream(mediaStream);
       if (videoRef.current) {
         videoRef.current.srcObject = mediaStream;
+        // Explicitly trigger play to prevent freeze/pause state on iOS and mobile devices
+        try {
+          await videoRef.current.play();
+        } catch (playErr) {
+          console.warn("Auto-play on video element failed:", playErr);
+        }
       }
     } catch (err: any) {
       console.error("Camera startup error:", err);
-      setCameraError(
-        "Could not access your camera. This could be due to permission restrictions or because your device does not have an active camera. Please use the Upload tab to import a file or photo instead."
-      );
+      
+      let specificError = "Could not access your camera. Please use the Upload tab to import a file or photo instead.";
+      
+      // Categorized Error Handling
+      if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+        specificError = "Permission Denied: Please allow camera access in your browser settings or device permissions to capture your question.";
+      } else if (err.name === "NotFoundError" || err.name === "DevicesNotFoundError") {
+        specificError = "No camera found: We couldn't detect any active camera connected to your device. Please use the File Upload tab.";
+      } else if (err.name === "NotReadableError" || err.name === "TrackStartError") {
+        specificError = "Camera In Use: Your camera is currently active in another application. Please close other camera apps and try again.";
+      } else if (err.name === "SecurityError") {
+        specificError = "Security Restriction: Camera access is blocked due to domain security policies or iframe frame permission boundaries.";
+      }
+
+      if (isPreviewEnv) {
+        // Automatically fall back to Upload tab on preview environment failures
+        setActiveTab("upload");
+        setCameraNotice(`Camera is unavailable in the preview context (${err.name || "Access Blocked"}). Switched to File Upload.`);
+      } else {
+        setCameraError(specificError);
+      }
     }
   };
 
@@ -356,14 +439,16 @@ export default function CameraScanner({
         setSourceImage(optimizedUrl);
         setCroppedImage(optimizedUrl); // Default cropped to full image first
         stopCamera();
-        setIsCropping(true); // Direct to crop view
+        setIsCropping(false); // Skip crop view entirely
+        triggerOcr(optimizedUrl); // Automatically process full image using OCR
       } catch (err: any) {
         console.error("Failed to optimize captured photo:", err);
         // Fallback to original captured image
         setSourceImage(dataUrl);
         setCroppedImage(dataUrl);
         stopCamera();
-        setIsCropping(true);
+        setIsCropping(false);
+        triggerOcr(dataUrl);
       }
     }
   };
@@ -385,7 +470,8 @@ export default function CameraScanner({
       const optimizedUrl = await optimizeImage(file);
       setSourceImage(optimizedUrl);
       setCroppedImage(optimizedUrl);
-      setIsCropping(true); // Let user adjust crop frame for uploaded image too
+      setIsCropping(false); // Skip crop view entirely
+      triggerOcr(optimizedUrl); // Automatically process full image using OCR
     } catch (err: any) {
       console.error("Failed to optimize uploaded file:", err);
       // Fallback to standard reader
@@ -394,7 +480,8 @@ export default function CameraScanner({
         const base64 = reader.result as string;
         setSourceImage(base64);
         setCroppedImage(base64);
-        setIsCropping(true);
+        setIsCropping(false);
+        triggerOcr(base64);
       };
       reader.onerror = () => {
         setOcrError("Failed to read the uploaded image file.");
@@ -556,6 +643,8 @@ export default function CameraScanner({
     setOcrError(null);
     setTechnicalErrorDetails(null);
     setIsDeveloperDetailsExp(false);
+    setDetectedQuestions([]);
+    setSelectedQuestionId(null);
     if (activeTab === "camera") {
       startCamera();
     }
@@ -696,9 +785,6 @@ export default function CameraScanner({
             throw new Error("OCR returned empty text: The text was completely unreadable, blurry, low-contrast, or contained no recognizable mathematical characters.");
           }
 
-          // Success payload processing
-          setExtractedResult(extractedText);
-          
           const confidenceVal = typeof data.data?.confidence === "number" ? data.data.confidence : 0.95;
           const scorePercent = Math.max(10, Math.min(99, Math.round(confidenceVal * 100)));
           
@@ -709,14 +795,48 @@ export default function CameraScanner({
           const isMathOrText = data.data?.problem_type === "math" || data.data?.problem_type === "text" || data.data?.problem_type === "unknown";
           setIsQuestion(isMathOrText);
 
-          // Store to scan history automatically
-          saveScanToHistory({
-            id: Date.now().toString(),
-            imagePreview: imageB64,
-            extractedText,
-            confidence: confidenceVal >= 0.70 ? "high" : "low",
-            timestamp: Date.now(),
-          });
+          const questions = Array.isArray(data.data?.questions) ? data.data.questions : [];
+          const resolvedQuestions = questions.length > 0 ? questions : [{
+            id: "q1",
+            text: extractedText,
+            box: { ymin: 0, xmin: 0, ymax: 100, xmax: 100 }
+          }];
+
+          if (resolvedQuestions.length === 1) {
+            // Requirement: "If only one question is detected, automatically select it. Extract only the selected question and send it to the existing AI solving workflow."
+            const singleQuestionText = resolvedQuestions[0].text;
+            setExtractedResult(singleQuestionText);
+            setSelectedQuestionId(resolvedQuestions[0].id);
+            setDetectedQuestions(resolvedQuestions);
+
+            // Store to scan history automatically
+            saveScanToHistory({
+              id: Date.now().toString(),
+              imagePreview: imageB64,
+              extractedText: singleQuestionText,
+              confidence: confidenceVal >= 0.70 ? "high" : "low",
+              timestamp: Date.now(),
+            });
+
+            // Send output back to Solviora Solver Input and solve immediately
+            onTextScanned(singleQuestionText, true);
+            setIsOpen(false);
+            resetCaptured();
+          } else {
+            // Multiple questions detected!
+            setDetectedQuestions(resolvedQuestions);
+            setSelectedQuestionId(null); // Unselected by default so they can choose
+            setExtractedResult(""); // Keep text area empty until they select
+
+            // Store the overall text to history
+            saveScanToHistory({
+              id: Date.now().toString(),
+              imagePreview: imageB64,
+              extractedText: extractedText,
+              confidence: confidenceVal >= 0.70 ? "high" : "low",
+              timestamp: Date.now(),
+            });
+          }
 
           finalSuccess = true;
           break; // Break loop since we succeeded!
@@ -870,6 +990,7 @@ export default function CameraScanner({
                       onClick={() => {
                         setActiveTab("camera");
                         setCameraError(null);
+                        setCameraNotice(null);
                       }}
                       className={`flex-1 py-2 px-3.5 rounded-xl font-bold text-xs uppercase tracking-wide flex items-center justify-center gap-2 cursor-pointer transition-all ${
                         activeTab === "camera"
@@ -883,7 +1004,11 @@ export default function CameraScanner({
 
                     <button
                       type="button"
-                      onClick={() => setActiveTab("upload")}
+                      onClick={() => {
+                        setActiveTab("upload");
+                        setCameraError(null);
+                        setCameraNotice(null);
+                      }}
                       className={`flex-1 py-2 px-3.5 rounded-xl font-bold text-xs uppercase tracking-wide flex items-center justify-center gap-2 cursor-pointer transition-all ${
                         activeTab === "upload"
                           ? "bg-[#6366f1] text-white shadow-md shadow-indigo-600/20"
@@ -896,7 +1021,11 @@ export default function CameraScanner({
 
                     <button
                       type="button"
-                      onClick={() => setActiveTab("history")}
+                      onClick={() => {
+                        setActiveTab("history");
+                        setCameraError(null);
+                        setCameraNotice(null);
+                      }}
                       className={`flex-1 py-2 px-3.5 rounded-xl font-bold text-xs uppercase tracking-wide flex items-center justify-center gap-2 cursor-pointer transition-all ${
                         activeTab === "history"
                           ? "bg-[#6366f1] text-white shadow-md shadow-indigo-600/20"
@@ -1047,6 +1176,7 @@ export default function CameraScanner({
                             ref={videoRef}
                             autoPlay
                             playsInline
+                            muted
                             className="w-full max-h-[350px] object-cover"
                           />
                           
@@ -1099,6 +1229,19 @@ export default function CameraScanner({
                 {/* 3. GALLERY / FILE DRAG-AND-DROP UPLOAD VIEW */}
                 {!sourceImage && activeTab === "upload" && (
                   <div className="space-y-4">
+                    {cameraNotice && (
+                      <div className="p-3.5 rounded-2xl border border-indigo-500/10 bg-indigo-500/[0.03] text-[#a5b4fc] flex items-center gap-3 text-xs leading-normal">
+                        <Info className="w-4.5 h-4.5 text-indigo-400 shrink-0" />
+                        <span className="flex-1 font-medium">{cameraNotice}</span>
+                        <button
+                          type="button"
+                          onClick={() => setCameraNotice(null)}
+                          className="text-[10px] uppercase font-extrabold tracking-wider text-indigo-400 hover:text-indigo-300 transition shrink-0 cursor-pointer"
+                        >
+                          Dismiss
+                        </button>
+                      </div>
+                    )}
                     <div
                       onDragOver={handleDragOver}
                       onDrop={handleDrop}
@@ -1381,17 +1524,10 @@ export default function CameraScanner({
                         <div className="flex gap-2">
                           <button
                             type="button"
-                            onClick={() => setIsCropping(true)}
-                            className="text-[10px] uppercase font-bold tracking-wider px-2.5 py-1.5 rounded-lg border border-slate-800 bg-slate-900/40 text-slate-300 hover:text-white hover:bg-slate-800 transition"
-                          >
-                            Recrop
-                          </button>
-                          <button
-                            type="button"
                             onClick={resetCaptured}
-                            className="text-[10px] uppercase font-bold tracking-wider text-rose-450 hover:text-rose-400 transition"
+                            className="px-4 py-1.5 rounded-lg bg-rose-500/10 border border-rose-500/25 text-rose-400 text-[10px] uppercase font-black tracking-widest hover:bg-rose-500/25 transition cursor-pointer"
                           >
-                            Retake
+                            Retake / New Scan
                           </button>
                         </div>
                       </div>
@@ -1408,20 +1544,62 @@ export default function CameraScanner({
                     {/* TWO COLUMN GRID FOR OCR PREVIEW (LT) & EXTRACED TEXT ZONE (RT) */}
                     <div className="grid grid-cols-1 md:grid-cols-12 gap-5">
                       
-                      {/* REQUIREMENT 6: OCR PREVIEW LEFT PANEL */}
-                      <div className="md:col-span-4 space-y-3.5">
-                        <label className="text-[10px] font-extrabold uppercase tracking-widest text-slate-450 block">
-                          Capture Source:
-                        </label>
+                      {/* REQUIREMENT 6: OCR PREVIEW LEFT PANEL WITH INTERACTIVE OVERLAYS */}
+                      <div className="md:col-span-6 space-y-3.5">
+                        <div className="flex items-center justify-between">
+                          <label className="text-[10px] font-extrabold uppercase tracking-widest text-slate-450 block">
+                            Interactive Selector:
+                          </label>
+                          {detectedQuestions.length > 1 && (
+                            <span className="text-[10px] text-[#818cf8] font-black bg-indigo-500/10 px-2 py-0.5 rounded-md border border-indigo-500/20 animate-pulse">
+                              🎯 Click to Select Question
+                            </span>
+                          )}
+                        </div>
                         
                         <div className="border border-slate-850 rounded-2xl p-3 bg-[#0a101d] space-y-3 shadow-inner">
-                          <div className="relative rounded-xl overflow-hidden aspect-video border border-slate-800 flex items-center justify-center bg-black">
+                          <div className="relative rounded-xl overflow-hidden border border-slate-800 flex items-center justify-center bg-black">
                             <img
-                              src={croppedImage || sourceImage || ""}
-                              alt="Crop Staging Thumbnail"
-                              className="w-full h-full object-cover"
+                              src={sourceImage || ""}
+                              alt="Captured Source Image"
+                              className="w-full h-auto max-h-[300px] object-contain block"
                             />
-                            <div className="absolute inset-0 bg-slate-950/5"></div>
+                            
+                            {/* Overlay Questions Boxes if multiple questions exist */}
+                            {detectedQuestions.length > 1 && detectedQuestions.map((q, idx) => {
+                              const isSelected = selectedQuestionId === q.id;
+                              return (
+                                <button
+                                  key={q.id}
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedQuestionId(q.id);
+                                    setExtractedResult(q.text);
+                                  }}
+                                  className={`absolute transition-all duration-300 rounded-lg flex items-center justify-center group ${
+                                    isSelected
+                                      ? "border-2 border-indigo-500 bg-indigo-500/20 shadow-[0_0_15px_rgba(99,102,241,0.5)] z-20"
+                                      : "border border-dashed border-indigo-400/50 bg-indigo-500/5 hover:border-indigo-400 hover:bg-indigo-500/15 z-10 cursor-pointer"
+                                  }`}
+                                  style={{
+                                    top: `${q.box.ymin}%`,
+                                    left: `${q.box.xmin}%`,
+                                    width: `${q.box.xmax - q.box.xmin}%`,
+                                    height: `${q.box.ymax - q.box.ymin}%`,
+                                  }}
+                                  title={`Select Question ${idx + 1}`}
+                                >
+                                  {/* Visual numeric indicator badge on corner of box */}
+                                  <span className={`absolute -top-2.5 -left-1 px-1.5 py-0.5 rounded text-[9px] font-black uppercase font-mono tracking-wider transition-all shadow ${
+                                    isSelected
+                                      ? "bg-indigo-500 text-white"
+                                      : "bg-slate-900 border border-indigo-500/30 text-indigo-300 group-hover:bg-indigo-950 group-hover:text-indigo-200"
+                                  }`}>
+                                    Q{idx + 1}
+                                  </span>
+                                </button>
+                              );
+                            })}
                           </div>
 
                           {/* Statistics grid values */}
@@ -1434,8 +1612,8 @@ export default function CameraScanner({
                             </div>
 
                             <div className="flex items-center justify-between border-b border-slate-850 pb-1.5">
-                              <span className="text-slate-500">Rows Detected:</span>
-                              <span className="font-bold text-slate-200">{numLinesDetected}</span>
+                              <span className="text-slate-500">Questions Detected:</span>
+                              <span className="font-bold text-slate-200">{detectedQuestions.length}</span>
                             </div>
 
                             <div className="flex flex-col gap-1">
@@ -1457,7 +1635,7 @@ export default function CameraScanner({
                       </div>
 
                       {/* REQUIREMENT 4: EXTRACTED TEXT EDITOR BLOCK RIGHT PANEL */}
-                      <div className="md:col-span-8 space-y-3.5">
+                      <div className="md:col-span-6 space-y-3.5">
                         <div className="flex items-center justify-between">
                           <label className="text-[10px] font-black uppercase tracking-widest text-[#818cf8] block">
                             Extracted Question Area:
