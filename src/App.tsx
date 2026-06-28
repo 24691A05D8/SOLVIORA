@@ -136,6 +136,8 @@ export default function App() {
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string>("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [retryAttempt, setRetryAttempt] = useState<number>(0);
+  const [lastSolvedQuestion, setLastSolvedQuestion] = useState<string>("");
 
   // --- PERSISTENT CALCULATIONS HISTORY ---
   const [historyList, setHistoryList] = useState<CalculationItem[]>([]);
@@ -274,10 +276,21 @@ export default function App() {
 
   // --- ASYNCHRONOUS BACKGROUND AI CLIENT MODULE ---
   const handleAiExplain = async (overridePrompt?: string) => {
-    const promptText = overridePrompt || aiQuestion;
+    const promptText = (overridePrompt || aiQuestion).trim();
 
-    if (!promptText.trim()) {
+    if (!promptText) {
       setErrorMsg("Please type a clear, mathematical question first!");
+      return;
+    }
+
+    // 7. Prevent duplicate requests if already in progress
+    if (isLoading) {
+      return;
+    }
+
+    // 8. Optimize API usage: Avoid unnecessary repeated requests if the exact query was already successfully solved
+    if (aiResult && lastSolvedQuestion === promptText && !errorMsg) {
+      console.info("[AI Optimization] Skipping duplicate request as this question is already successfully solved.");
       return;
     }
 
@@ -286,6 +299,7 @@ export default function App() {
     setAiResult("");
     setAiExplanation("");
     setAiSteps([]);
+    setRetryAttempt(0);
 
     // Diagram Step 1: User Input Captured
     setActiveStep(1);
@@ -295,55 +309,92 @@ export default function App() {
     setActiveStep(2);
     await new Promise((r) => setTimeout(r, 450));
 
-    try {
-      // Diagram Step 3: Backend securely proxies request
-      setActiveStep(3);
+    // Diagram Step 3: Backend securely proxies request
+    setActiveStep(3);
 
-      const response = await fetch("/api/explain", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ question: promptText }),
-      });
+    const maxRetries = 3;
+    const retryDelays = [2000, 4000, 8000]; // 2s, 4s, 8s backoff delays as requested
+    let success = false;
+    let attempt = 0;
 
-      // Diagram Step 4: AI Model Thinking parallel animation
-      setActiveStep(4);
-      await new Promise((r) => setTimeout(r, 700));
-
-      if (!response.ok) {
-        const errPayload = await response.json();
-        throw new Error(errPayload.error || `HTTP error returned with code ${response.status}`);
+    while (attempt <= maxRetries && !success) {
+      if (attempt > 0) {
+        setRetryAttempt(attempt);
+        const delayMs = retryDelays[attempt - 1];
+        console.warn(`[AI Retry System] Attempt ${attempt}/${maxRetries} failed. Retrying in ${delayMs}ms...`);
+        await new Promise((r) => setTimeout(r, delayMs));
       }
 
-      const data = await response.json();
-
-      if (data.success) {
-        // Diagram Step 5: Rendering data callback
-        setActiveStep(5);
-        setAiResult(data.result);
-        setAiExplanation(data.explanation);
-        setAiSteps(data.steps || []);
-
-        saveToHistory({
-          id: Date.now().toString(),
-          type: "ai",
-          input: promptText,
-          result: data.result,
-          explanation: data.explanation,
-          steps: data.steps,
-          timestamp: Date.now(),
+      try {
+        const response = await fetch("/api/explain", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ question: promptText }),
         });
-      } else {
-        throw new Error(data.error || "The server could not solve this math statement.");
+
+        // 5. Detect and handle various categories of error statuses
+        if (!response.ok) {
+          const responseBody = await response.text().catch(() => "");
+          // 6. Log the complete API error in the browser console for debugging
+          console.error(`[AI API Error Log] Status: ${response.status} ${response.statusText}`, {
+            status: response.status,
+            statusText: response.statusText,
+            responseBody,
+            url: "/api/explain",
+            attempt: attempt + 1
+          });
+
+          throw new Error(`API_ERROR: HTTP ${response.status} - ${responseBody || response.statusText}`);
+        }
+
+        const data = await response.json();
+
+        if (data.success) {
+          // Diagram Step 4: AI Model Thinking parallel animation
+          setActiveStep(4);
+          await new Promise((r) => setTimeout(r, 700));
+
+          // Diagram Step 5: Rendering data callback
+          setActiveStep(5);
+          setAiResult(data.result);
+          setAiExplanation(data.explanation);
+          setAiSteps(data.steps || []);
+          setLastSolvedQuestion(promptText);
+
+          saveToHistory({
+            id: Date.now().toString(),
+            type: "ai",
+            input: promptText,
+            result: data.result,
+            explanation: data.explanation,
+            steps: data.steps,
+            timestamp: Date.now(),
+          });
+
+          success = true;
+          setRetryAttempt(0);
+        } else {
+          // 6. Log the complete API error in the browser console for debugging
+          console.error(`[AI API Error Log] Server returned successful HTTP response but failed solver payload:`, data);
+          throw new Error(data.error || "The server could not solve this math statement.");
+        }
+      } catch (err: any) {
+        // 6. Log the complete API error in the browser console for debugging
+        console.error(`[AI Solviora Solver] Attempt ${attempt + 1}/${maxRetries + 1} failed:`, err);
+        
+        attempt++;
+        if (attempt > maxRetries) {
+          // 4. If all retries fail: display friendly message, keep user input preserved
+          setErrorMsg("The AI service is temporarily busy. Your question has been saved. Please try again in a few moments.");
+          setActiveStep(0);
+          setRetryAttempt(0);
+        }
       }
-    } catch (err: any) {
-      console.error("AI service error: ", err);
-      setErrorMsg("⚠️ The AI service is currently experiencing high demand or is temporarily unavailable.\nPlease wait a few moments before requesting a new calculation.");
-      setActiveStep(0);
-    } finally {
-      setIsLoading(false);
     }
+
+    setIsLoading(false);
   };
 
   const loadPreset = (presetText: string) => {
@@ -673,7 +724,7 @@ export default function App() {
                                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
                               </svg>
-                              <span>Tutor is Thinking...</span>
+                              <span>{retryAttempt > 0 ? `Retrying... (${retryAttempt}/3)` : "Tutor is Thinking..."}</span>
                             </>
                           ) : (
                             <>
@@ -801,14 +852,20 @@ export default function App() {
                           </div>
                         </div>
                         <h4 className="font-bold text-sm tracking-tight text-indigo-400">
-                          {activeStep === 1 && "Analyzing input question..."}
-                          {activeStep === 2 && "Decomposing calculation..."}
-                          {activeStep === 3 && "Connecting to AI Tutor..."}
-                          {activeStep === 4 && "Generating solution steps..."}
-                          {activeStep === 5 && "Formatting results..."}
+                          {retryAttempt > 0 ? (
+                            `Retrying... (${retryAttempt}/3)`
+                          ) : (
+                            <>
+                              {activeStep === 1 && "Analyzing input question..."}
+                              {activeStep === 2 && "Decomposing calculation..."}
+                              {activeStep === 3 && "Connecting to AI Tutor..."}
+                              {activeStep === 4 && "Generating solution steps..."}
+                              {activeStep === 5 && "Formatting results..."}
+                            </>
+                          )}
                         </h4>
                         <p className="text-[10px] text-slate-400 uppercase mt-1">
-                          Evaluating logic securely...
+                          {retryAttempt > 0 ? "Transient busy state. Retrying automatically..." : "Evaluating logic securely..."}
                         </p>
                       </div>
                     ) : (
