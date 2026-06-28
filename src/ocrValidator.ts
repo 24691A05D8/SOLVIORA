@@ -14,8 +14,9 @@ export function validateOCR(data: any) {
 
   return {
     status: isSuccess ? "success" : "error",
-    error_code: typeof data.error_code === "number" ? data.error_code : (isSuccess ? 0 : 1008),
+    error_code: (typeof data.error_code === "number" || typeof data.error_code === "string") ? data.error_code : (isSuccess ? 0 : 1008),
     error_type: isSuccess ? null : (data.error_type ?? "INVALID_INPUT"),
+    message: typeof data.message === "string" ? data.message : undefined,
     data: {
       text: typeof data?.data?.text === "string" ? data.data.text : "",
       confidence: typeof data?.data?.confidence === "number" ? data.data.confidence : (isSuccess ? 0.95 : 0.0),
@@ -87,7 +88,7 @@ export function hardParser(rawText: string): any {
 
   // 2. Extract key components safely
   let status = parsed.status === "success" ? "success" : "error";
-  let error_code = typeof parsed.error_code === "number" ? parsed.error_code : (status === "error" ? 1008 : 0);
+  let error_code = (typeof parsed.error_code === "number" || typeof parsed.error_code === "string") ? parsed.error_code : (status === "error" ? 1008 : 0);
   let error_type = parsed.error_type ?? (status === "error" ? "INVALID_INPUT" : null);
 
   let innerText = "";

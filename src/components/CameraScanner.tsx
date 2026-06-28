@@ -61,7 +61,7 @@ const optimizeImage = async (imageSrc: File | string): Promise<string> => {
         
         let targetWidth = originalWidth;
         let targetHeight = originalHeight;
-        const maxDim = 1280;
+        const maxDim = 1024; // Optimized from 1280 to significantly reduce transmission payload and model inference time
         
         if (originalWidth > maxDim || originalHeight > maxDim) {
           if (originalWidth > originalHeight) {
@@ -103,14 +103,15 @@ const optimizeImage = async (imageSrc: File | string): Promise<string> => {
         // Draw image onto canvas
         ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
         
-        let quality = 0.8;
+        let quality = 0.75; // Start quality optimized between 60-75%
         let finalDataUrl = "";
         let isUnderLimit = false;
+        const targetSizeLimit = 350 * 1024; // 350 KB target for rapid transmission
         
         if (typeof OffscreenCanvas !== "undefined" && canvas instanceof OffscreenCanvas) {
-          while (!isUnderLimit && quality >= 0.5) {
+          while (!isUnderLimit && quality >= 0.60) {
             const blob = await canvas.convertToBlob({ type: "image/jpeg", quality });
-            if (blob.size < 1024 * 1024 || quality <= 0.5) {
+            if (blob.size < targetSizeLimit || quality <= 0.60) {
               isUnderLimit = true;
               finalDataUrl = await new Promise<string>((res, rej) => {
                 const r = new FileReader();
@@ -119,18 +120,18 @@ const optimizeImage = async (imageSrc: File | string): Promise<string> => {
                 r.readAsDataURL(blob);
               });
             } else {
-              quality -= 0.05;
+              quality -= 0.03;
             }
           }
         } else if (canvas instanceof HTMLCanvasElement) {
-          while (!isUnderLimit && quality >= 0.5) {
+          while (!isUnderLimit && quality >= 0.60) {
             finalDataUrl = canvas.toDataURL("image/jpeg", quality);
             // approximate size: (base64 length * 3/4)
             const approxSize = (finalDataUrl.length - 22) * 3 / 4;
-            if (approxSize < 1024 * 1024 || quality <= 0.5) {
+            if (approxSize < targetSizeLimit || quality <= 0.60) {
               isUnderLimit = true;
             } else {
-              quality -= 0.05;
+              quality -= 0.03;
             }
           }
         }
@@ -222,6 +223,7 @@ export default function CameraScanner({
   // Error diagnostic modules
   const [technicalErrorDetails, setTechnicalErrorDetails] = useState<string | null>(null);
   const [isDeveloperDetailsExp, setIsDeveloperDetailsExp] = useState(false);
+  const [preOptimizedSize, setPreOptimizedSize] = useState<number>(0);
 
   // Scan History State
   const [scanHistory, setScanHistory] = useState<ScanHistoryItem[]>([]);
@@ -324,16 +326,6 @@ export default function CameraScanner({
     }
 
     try {
-      // Safely query permission if browser supports permissions API
-      if (navigator.permissions && navigator.permissions.query) {
-        try {
-          const status = await navigator.permissions.query({ name: 'camera' as any });
-          console.log("Current camera permission status:", status.state);
-        } catch (pErr) {
-          console.warn("Permissions query failed safely:", pErr);
-        }
-      }
-
       // 2. Request camera permission and open camera with progressive constraints
       let mediaStream: MediaStream;
       try {
@@ -364,15 +356,6 @@ export default function CameraScanner({
       }
 
       setStream(mediaStream);
-      if (videoRef.current) {
-        videoRef.current.srcObject = mediaStream;
-        // Explicitly trigger play to prevent freeze/pause state on iOS and mobile devices
-        try {
-          await videoRef.current.play();
-        } catch (playErr) {
-          console.warn("Auto-play on video element failed:", playErr);
-        }
-      }
     } catch (err: any) {
       console.error("Camera startup error:", err);
       
@@ -407,10 +390,37 @@ export default function CameraScanner({
     }
   };
 
+  // Resilient useEffect to bind the camera stream to the video tag element once it mounts
+  useEffect(() => {
+    let active = true;
+    if (stream && videoRef.current) {
+      const video = videoRef.current;
+      if (video.srcObject !== stream) {
+        video.srcObject = stream;
+      }
+      
+      const playVideo = async () => {
+        try {
+          if (active) {
+            await video.play();
+          }
+        } catch (playErr) {
+          console.warn("Autoplay / stream play failed:", playErr);
+        }
+      };
+      playVideo();
+    }
+    return () => {
+      active = false;
+    };
+  }, [stream, activeTab]);
+
   // Manage camera state on tab changes or dialog opening
   useEffect(() => {
     if (isOpen && activeTab === "camera" && !sourceImage) {
-      startCamera();
+      if (!stream) {
+        startCamera();
+      }
     } else {
       stopCamera();
     }
@@ -433,6 +443,8 @@ export default function CameraScanner({
     if (ctx) {
       ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
       const dataUrl = canvas.toDataURL("image/png");
+      const originalSize = dataUrl.length * 3 / 4;
+      setPreOptimizedSize(originalSize);
       
       try {
         const optimizedUrl = await optimizeImage(dataUrl);
@@ -440,7 +452,7 @@ export default function CameraScanner({
         setCroppedImage(optimizedUrl); // Default cropped to full image first
         stopCamera();
         setIsCropping(false); // Skip crop view entirely
-        triggerOcr(optimizedUrl); // Automatically process full image using OCR
+        triggerOcr(optimizedUrl, originalSize); // Automatically process full image using OCR
       } catch (err: any) {
         console.error("Failed to optimize captured photo:", err);
         // Fallback to original captured image
@@ -448,7 +460,7 @@ export default function CameraScanner({
         setCroppedImage(dataUrl);
         stopCamera();
         setIsCropping(false);
-        triggerOcr(dataUrl);
+        triggerOcr(dataUrl, originalSize);
       }
     }
   };
@@ -466,12 +478,21 @@ export default function CameraScanner({
       setOcrError("Please upload a valid image file (PNG, JPEG, WEBP)");
       return;
     }
+    // Reject uploads that exceed a reasonable size limit with a clear user message
+    const MAX_UPLOAD_SIZE = 12 * 1024 * 1024; // 12 MB
+    if (file.size > MAX_UPLOAD_SIZE) {
+      setOcrError(`⚠️ Upload failed: The image file is too large (${(file.size / (1024 * 1024)).toFixed(1)}MB). The maximum allowed size for OCR scanning is 12MB. Please upload a smaller or compressed image.`);
+      return;
+    }
+
+    setPreOptimizedSize(file.size);
+
     try {
       const optimizedUrl = await optimizeImage(file);
       setSourceImage(optimizedUrl);
       setCroppedImage(optimizedUrl);
       setIsCropping(false); // Skip crop view entirely
-      triggerOcr(optimizedUrl); // Automatically process full image using OCR
+      triggerOcr(optimizedUrl, file.size); // Automatically process full image using OCR
     } catch (err: any) {
       console.error("Failed to optimize uploaded file:", err);
       // Fallback to standard reader
@@ -481,7 +502,7 @@ export default function CameraScanner({
         setSourceImage(base64);
         setCroppedImage(base64);
         setIsCropping(false);
-        triggerOcr(base64);
+        triggerOcr(base64, file.size);
       };
       reader.onerror = () => {
         setOcrError("Failed to read the uploaded image file.");
@@ -613,19 +634,21 @@ export default function CameraScanner({
       if (ctx) {
         ctx.drawImage(img, pxX, pxY, pxW, pxH, 0, 0, pxW, pxH);
         const base64cropped = canvas.toDataURL("image/png");
+        const originalSize = base64cropped.length * 3 / 4;
+        setPreOptimizedSize(originalSize);
         
         optimizeImage(base64cropped)
           .then((optimizedCropped) => {
             setCroppedImage(optimizedCropped);
             setIsCropping(false); // Staging
-            triggerOcr(optimizedCropped);
+            triggerOcr(optimizedCropped, originalSize);
           })
           .catch((err) => {
             console.error("Failed to optimize cropped image:", err);
             // Fallback to unoptimized cropped image
             setCroppedImage(base64cropped);
             setIsCropping(false);
-            triggerOcr(base64cropped);
+            triggerOcr(base64cropped, originalSize);
           });
       }
     };
@@ -651,7 +674,7 @@ export default function CameraScanner({
   };
 
   // --- TRIGGER BACKEND MULTIMODAL OCR ---
-  const triggerOcr = async (imageB64: string) => {
+  const triggerOcr = async (imageB64: string, customOriginalSize?: number) => {
     setIsOcrProcessing(true);
     setOcrError(null);
     setTechnicalErrorDetails(null);
@@ -680,13 +703,20 @@ export default function CameraScanner({
     const blobType = blob ? blob.type : "unknown";
     const b64Length = imageB64 ? imageB64.length : 0;
 
+    // Compression ratio metrics calculation
+    const originalSize = customOriginalSize || preOptimizedSize || (b64Length * 3 / 4);
+    const compressedSize = b64Length * 3 / 4;
+    const compressionRatio = originalSize > 0 ? (originalSize / compressedSize).toFixed(2) : "1.00";
+
     // Verbose, structured audit logging for developer console diagnostics
     console.info("========================================");
     console.info("⚡ SOLVIORA MULTIMODAL OCR ENGINE DIAGNOSTICS");
     console.info(`- Crop coordinates: X=${cropBox.x}%, Y=${cropBox.y}%, W=${cropBox.w}%, H=${cropBox.h}%`);
     console.info(`- Base64 length: ${b64Length} characters`);
     console.info(`- Decoded Blob type: ${blobType}`);
-    console.info(`- Decoded Blob size: ${blobSize} bytes (${(blobSize / 1024).toFixed(2)} KB)`);
+    console.info(`- Original pre-compression size: ${originalSize} bytes`);
+    console.info(`- Compressed Blob size: ${blobSize} bytes (${(blobSize / 1024).toFixed(2)} KB)`);
+    console.info(`- Compression ratio achieved: ${compressionRatio}x`);
     console.info("========================================");
 
     // Prevent submitting empty or invalid files
@@ -718,31 +748,47 @@ export default function CameraScanner({
     const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
     
     let attempt = 0;
-    const maxRetries = 3; // Maximum retries = 3
+    const maxRetries = 1; // Retry once automatically for transient network failures as requested
     let lastErr: any = null;
     let finalSuccess = false;
     let fallbackText = "";
 
+    const clientSentTime = Date.now();
+
     while (attempt <= maxRetries) {
       try {
         if (attempt > 0) {
-          // Increase delay exponentially (1s -> 2s -> 4s)
-          // Since attempt is 1, 2, 3: Delay = 1000 * 2^(attempt - 1)
-          const delayMs = 1000 * Math.pow(2, attempt - 1);
-          console.warn(`[OCR Retry System] Retrying in ${delayMs}ms... (Attempt ${attempt}/${maxRetries})`);
+          // Retry delay (2 seconds)
+          const delayMs = 2000;
+          console.warn(`[OCR Retry System] Transient error detected. Retrying once in ${delayMs}ms... (Attempt ${attempt}/${maxRetries})`);
           await sleep(delayMs);
         }
 
-        const response = await fetch("/api/ocr", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            image: imageB64,
-            mimeType: blobType
-          }),
-        });
+        // Establish a strict 40-second client-side timeout using AbortController (as requested: 30-45 seconds)
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => {
+          controller.abort();
+        }, 40000);
+
+        let response;
+        const fetchStart = Date.now();
+        try {
+          response = await fetch("/api/ocr", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              image: imageB64,
+              mimeType: blobType,
+              originalSize,
+              clientSentTime
+            }),
+            signal: controller.signal,
+          });
+        } finally {
+          clearTimeout(timeoutId);
+        }
 
         const contentType = response.headers.get("content-type") || "";
 
@@ -752,9 +798,11 @@ export default function CameraScanner({
           responseHeaders[key] = val;
         });
 
+        const fetchDuration = Date.now() - fetchStart;
+
         console.info(`[HTTP Attempt ${attempt + 1}] Status Code: ${response.status} ${response.statusText}`);
         console.info(`[HTTP Attempt ${attempt + 1}] Content-Type Header: ${contentType}`);
-        console.info(`[HTTP Attempt ${attempt + 1}] Response Headers:`, responseHeaders);
+        console.info(`[HTTP Attempt ${attempt + 1}] Duration: ${fetchDuration}ms`);
 
         const responseBodyText = await response.text().catch(() => "");
         console.info(`[HTTP Payload] Body Length: ${responseBodyText.length} characters`);
@@ -767,7 +815,7 @@ export default function CameraScanner({
         } catch (e) {
           data = {
             status: "error",
-            error_code: 1008,
+            error_code: "OCR_PARSE_FAILED",
             error_type: "INVALID_INPUT",
             data: {
               text: "",
@@ -803,7 +851,6 @@ export default function CameraScanner({
           }];
 
           if (resolvedQuestions.length === 1) {
-            // Requirement: "If only one question is detected, automatically select it. Extract only the selected question and send it to the existing AI solving workflow."
             const singleQuestionText = resolvedQuestions[0].text;
             setExtractedResult(singleQuestionText);
             setSelectedQuestionId(resolvedQuestions[0].id);
@@ -846,8 +893,9 @@ export default function CameraScanner({
         if (data.status === "error") {
           const errCode = data.error_code;
           const errType = data.error_type;
+          const serverMessage = data.message;
 
-          const errorMap: Record<number, string> = {
+          const errorMap: Record<number | string, string> = {
             1001: "No image detected",
             1002: "Image too blurry",
             1003: "File corrupted",
@@ -855,13 +903,33 @@ export default function CameraScanner({
             1005: "Too many requests",
             1006: "Network timeout",
             1007: "API not configured",
-            1008: "Invalid input"
+            1008: "Invalid input",
+            
+            // New specific codes
+            "NETWORK_TIMEOUT": "⚠️ The OCR request timed out. A connection timeout occurred. Please check your internet connection.",
+            "API_KEY_INVALID": "The server's Google Gemini API key is missing, unauthorized, or invalid. Please configure your API key in the Settings > Secrets menu in AI Studio.",
+            "API_RATE_LIMIT": "The Gemini API request limit has been exceeded. Please wait a few moments and try your camera scan again.",
+            "IMAGE_DECODE_FAILED": "The image data is corrupted, malformed, or of an unsupported format. Please retry capturing or upload another image.",
+            "GEMINI_UNAVAILABLE": "The AI service is temporarily overloaded or unavailable. We are retrying the request...",
+            "OCR_PARSE_FAILED": "OCR scanning failed to extract structured question text. Please try taking a clearer picture.",
+            "SERVER_ERROR": "A server error occurred while processing the OCR request."
           };
 
-          const friendlyError = errorMap[errCode] || "Unsupported image format or corrupt input. Try another screenshot.";
+          const friendlyError = serverMessage || errorMap[errCode] || errorMap[errType] || "Unsupported image format or corrupt input. Try another screenshot.";
 
-          // Retry ONLY for TIMEOUT or RATE_LIMIT
-          if (errCode === 1006 || errCode === 1005 || errType === "TIMEOUT" || errType === "RATE_LIMIT") {
+          const isRetryable = 
+            errCode === 1006 || 
+            errCode === 1005 || 
+            errCode === "NETWORK_TIMEOUT" || 
+            errCode === "API_RATE_LIMIT" || 
+            errCode === "GEMINI_UNAVAILABLE" ||
+            errType === "TIMEOUT" || 
+            errType === "RATE_LIMIT" ||
+            errType === "NETWORK_TIMEOUT" ||
+            errType === "API_RATE_LIMIT" ||
+            errType === "GEMINI_UNAVAILABLE";
+
+          if (isRetryable && attempt < maxRetries) {
             lastErr = new Error(friendlyError);
             attempt++;
             continue; // Go to next attempt
@@ -872,10 +940,17 @@ export default function CameraScanner({
         }
 
       } catch (err: any) {
-        lastErr = err;
+        if (err.name === "AbortError") {
+          lastErr = new Error("⚠️ The OCR request timed out. A connection timeout occurred. Please check your internet connection.");
+        } else {
+          lastErr = err;
+        }
         console.warn(`[OCR Retry System] Attempt ${attempt + 1}/${maxRetries + 1} failed:`, err.message || err);
-        // Treat fetch/network/unclassified errors as custom retryable, let them backoff
-        attempt++;
+        if (attempt < maxRetries) {
+          attempt++;
+        } else {
+          break;
+        }
       }
     }
 
@@ -922,6 +997,8 @@ export default function CameraScanner({
         onClick={() => {
           setIsOpen(true);
           setActiveTab("camera");
+          // Pre-trigger camera request immediately within user-gesture callstack for trust
+          startCamera();
         }}
         className={`w-full py-3.5 px-4 rounded-2xl font-black text-xs uppercase tracking-wide flex items-center justify-center gap-2.5 shadow-md hover:scale-[1.01] active:scale-[0.99] transition-all cursor-pointer border ${
           isDark 
@@ -991,6 +1068,8 @@ export default function CameraScanner({
                         setActiveTab("camera");
                         setCameraError(null);
                         setCameraNotice(null);
+                        // Trigger within user-gesture
+                        startCamera();
                       }}
                       className={`flex-1 py-2 px-3.5 rounded-xl font-bold text-xs uppercase tracking-wide flex items-center justify-center gap-2 cursor-pointer transition-all ${
                         activeTab === "camera"
@@ -1160,14 +1239,27 @@ export default function CameraScanner({
                         <AlertCircle className="w-10 h-10 text-rose-500 mb-3" />
                         <h4 className="font-extrabold text-xs uppercase tracking-wider mb-2">Camera Access Restricted</h4>
                         <p className="text-xs max-w-md leading-relaxed mb-4">{cameraError}</p>
-                        <button
-                          type="button"
-                          onClick={() => setActiveTab("upload")}
-                          className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs uppercase flex items-center gap-2 cursor-pointer shadow"
-                        >
-                          <Upload className="w-4 h-4" />
-                          <span>Switch to File Upload</span>
-                        </button>
+                        <div className="flex flex-wrap gap-3 justify-center">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCameraError(null);
+                              startCamera();
+                            }}
+                            className="px-5 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-750 font-bold text-xs uppercase flex items-center gap-2 cursor-pointer shadow"
+                          >
+                            <Camera className="w-4 h-4 text-indigo-400" />
+                            <span>Retry Camera</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setActiveTab("upload")}
+                            className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs uppercase flex items-center gap-2 cursor-pointer shadow"
+                          >
+                            <Upload className="w-4 h-4" />
+                            <span>Switch to File Upload</span>
+                          </button>
+                        </div>
                       </div>
                     ) : (
                       <div className="space-y-4">

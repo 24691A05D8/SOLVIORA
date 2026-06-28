@@ -101,39 +101,145 @@ function isTransientError(error: any): boolean {
 // Utility for sleep / backoff
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Helper to diagnose errors and map them to appropriate friendly responses
+const analyzeAndMapError = (error: any): { errorType: string; errorCode: string; message: string } => {
+  const errMsg = String(error?.message || error).toLowerCase();
+  const status = error?.status || error?.code || error?.statusCode;
+  
+  console.error(`[Backend OCR Log] ❌ Analyzing Exception:`, {
+    name: error?.name,
+    message: error?.message,
+    status: status,
+    stack: error?.stack,
+  });
+
+  if (
+    status === 401 ||
+    status === 403 ||
+    errMsg.includes("api key") ||
+    errMsg.includes("key is missing") ||
+    errMsg.includes("unauthorized") ||
+    errMsg.includes("not authenticated") ||
+    errMsg.includes("api_key_invalid")
+  ) {
+    return {
+      errorType: "API_KEY_INVALID",
+      errorCode: "API_KEY_INVALID",
+      message: "The server's Google Gemini API key is missing, unauthorized, or invalid. Please configure your API key in the Settings > Secrets menu in AI Studio."
+    };
+  }
+
+  if (
+    status === 429 ||
+    errMsg.includes("quota") ||
+    errMsg.includes("rate limit") ||
+    errMsg.includes("too many requests") ||
+    errMsg.includes("exhausted") ||
+    errMsg.includes("api_rate_limit")
+  ) {
+    return {
+      errorType: "API_RATE_LIMIT",
+      errorCode: "API_RATE_LIMIT",
+      message: "The Gemini API request limit has been exceeded. Please wait a few moments and try your camera scan again."
+    };
+  }
+
+  if (
+    errMsg.includes("timeout") ||
+    errMsg.includes("deadline") ||
+    errMsg.includes("etimedout") ||
+    errMsg.includes("socket") ||
+    errMsg.includes("abort") ||
+    errMsg.includes("hang up") ||
+    status === 408 ||
+    status === 504 ||
+    errMsg.includes("network_timeout")
+  ) {
+    return {
+      errorType: "NETWORK_TIMEOUT",
+      errorCode: "NETWORK_TIMEOUT",
+      message: "The OCR parsing request timed out while communicating with the AI service. This can happen under high server load. Retrying..."
+    };
+  }
+
+  if (
+    errMsg.includes("decode") ||
+    errMsg.includes("corrupt") ||
+    errMsg.includes("malformed") ||
+    errMsg.includes("unsupported") ||
+    errMsg.includes("image format") ||
+    errMsg.includes("image_decode_failed")
+  ) {
+    return {
+      errorType: "IMAGE_DECODE_FAILED",
+      errorCode: "IMAGE_DECODE_FAILED",
+      message: "The image data is corrupted, malformed, or of an unsupported format. Please retry capturing or upload another image."
+    };
+  }
+
+  if (
+    isTransientError(error) ||
+    errMsg.includes("gemini_unavailable") ||
+    errMsg.includes("unavailable") ||
+    errMsg.includes("overloaded")
+  ) {
+    return {
+      errorType: "GEMINI_UNAVAILABLE",
+      errorCode: "GEMINI_UNAVAILABLE",
+      message: "The AI service is temporarily overloaded or unavailable. We are retrying the request..."
+    };
+  }
+
+  if (
+    errMsg.includes("parse") ||
+    errMsg.includes("ocr_parse_failed") ||
+    errMsg.includes("json") ||
+    errMsg.includes("validation")
+  ) {
+    return {
+      errorType: "OCR_PARSE_FAILED",
+      errorCode: "OCR_PARSE_FAILED",
+      message: "OCR scanning failed to extract structured question text. Please try taking a clearer picture."
+    };
+  }
+
+  // Default server error
+  return {
+    errorType: "SERVER_ERROR",
+    errorCode: "SERVER_ERROR",
+    message: "A server error occurred while processing the OCR request."
+  };
+};
+
 /**
  * --- THE API ROUTE: OCR MULTIMODAL QUESTION SCANNER ---
  * Extracts math, science, or general text questions from uploaded or captured base64 images
  * using Gemini's powerful multimodal parsing capabilities.
  */
 app.post("/api/ocr", async (req, res) => {
+  const startTime = Date.now();
+  console.info(`\n============================================================`);
+  console.info(`[Backend OCR Log] 📥 RECEIVED OCR REQUEST AT ${new Date().toISOString()}`);
+  console.info(`============================================================`);
   // Helper to reliably build client-requested strict production JSON schema
   const buildOcrResponse = (opt: {
     status: "success" | "error";
-    errorType?: "EMPTY_IMAGE" | "LOW_QUALITY" | "CORRUPT_IMAGE" | "UNSUPPORTED_FORMAT" | "RATE_LIMIT" | "TIMEOUT" | "MISSING_API_KEY" | "INVALID_INPUT" | null;
-    errorCode?: number;
+    errorType?: string | null;
+    errorCode?: string | number;
     extractedText?: string;
     confidence?: number;
     problemType?: "math" | "text" | "unknown";
+    message?: string;
   }) => {
     let errorCodeVal = opt.errorCode || 0;
     if (opt.status === "error" && !errorCodeVal) {
-      switch (opt.errorType) {
-        case "EMPTY_IMAGE": errorCodeVal = 1001; break;
-        case "LOW_QUALITY": errorCodeVal = 1002; break;
-        case "CORRUPT_IMAGE": errorCodeVal = 1003; break;
-        case "UNSUPPORTED_FORMAT": errorCodeVal = 1004; break;
-        case "RATE_LIMIT": errorCodeVal = 1005; break;
-        case "TIMEOUT": errorCodeVal = 1006; break;
-        case "MISSING_API_KEY": errorCodeVal = 1007; break;
-        case "INVALID_INPUT": errorCodeVal = 1008; break;
-        default: errorCodeVal = 1008; break;
-      }
+      errorCodeVal = opt.errorType || "SERVER_ERROR";
     }
     return validateOCR({
       status: opt.status,
       error_code: errorCodeVal,
       error_type: opt.errorType || null,
+      message: opt.message,
       data: {
         text: opt.extractedText || "",
         confidence: typeof opt.confidence === "number" ? opt.confidence : (opt.status === "success" ? 0.95 : 0.0),
@@ -152,7 +258,7 @@ app.post("/api/ocr", async (req, res) => {
   }
 
   try {
-    const { image, mimeType } = req.body;
+    const { image, mimeType, originalSize, clientSentTime } = req.body;
 
     if (!image || typeof image !== "string" || !image.trim()) {
       return res.json(buildOcrResponse({
@@ -334,77 +440,56 @@ FALLBACK AND CRITICAL ERROR RULES (If you fail or cannot parse):
     let response;
     let textOutput = "";
     let isSuccessful = false;
+    let geminiApiError: any = null;
+    let geminiProcessingTime = 0;
 
-    // Helper function to safely extract and parse JSON from the AI output
-    const safeParseJson = (text: string): any => {
-      if (!text) return null;
-      const cleaned = text.trim();
-      
+    // Robust backend-side retries with exponential backoff on primary structured generation
+    const backoffTimes = [0, 1500, 3000]; // Multi-attempt retry delays
+    for (let attempt = 0; attempt < backoffTimes.length; attempt++) {
       try {
-        return JSON.parse(cleaned);
-      } catch (e) {
-        // Continue
-      }
-
-      try {
-        const jsonBlockRegex = /```(?:json)?\s*([\s\S]*?)\s*```/i;
-        const match = cleaned.match(jsonBlockRegex);
-        if (match && match[1]) {
-          return JSON.parse(match[1].trim());
+        if (attempt > 0) {
+          const backoff = backoffTimes[attempt];
+          console.warn(`[Backend OCR Log] [Attempt ${attempt + 1}/${backoffTimes.length}] Transient error or socket timeout, sleeping ${backoff}ms before backoff retry...`);
+          await sleep(backoff);
         }
-      } catch (e) {
-        // Continue
-      }
 
-      try {
-        const firstBrace = cleaned.indexOf('{');
-        const lastBrace = cleaned.lastIndexOf('}');
-        if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-          const candidateString = cleaned.substring(firstBrace, lastBrace + 1);
-          return JSON.parse(candidateString.trim());
+        console.info(`[Backend OCR Log] [Attempt ${attempt + 1}/${backoffTimes.length}] Dispatching primary generation call to Gemini...`);
+        const geminiCallStart = Date.now();
+        response = await ai.models.generateContent(generateParams);
+        const elapsed = Date.now() - geminiCallStart;
+        geminiProcessingTime += elapsed;
+        const geminiLatency = (elapsed / 1000).toFixed(2);
+        
+        textOutput = response.text || "";
+        isSuccessful = true;
+        
+        console.info(`[Backend OCR Log] [Attempt ${attempt + 1}/${backoffTimes.length}] Call completed successfully. Latency: ${geminiLatency}s, Response character count: ${textOutput.length}`);
+        break; // Succeeded! Break retry loop
+      } catch (err: any) {
+        geminiApiError = err;
+        console.error(`[Backend OCR Log] [Attempt ${attempt + 1}/${backoffTimes.length}] Call failed. Error message: ${err?.message || err}`);
+        
+        // Immediate termination if the error indicates a structural issue (unauthorized / invalid API key)
+        const errMsgLower = String(err?.message || err).toLowerCase();
+        const status = err?.status || err?.code;
+        if (status === 401 || status === 403 || errMsgLower.includes("api key") || errMsgLower.includes("key is missing") || errMsgLower.includes("unauthorized")) {
+          console.error("[Backend OCR Log] 🛑 Unauthorized API Key detected. Aborting backend retry loop.");
+          break;
         }
-      } catch (e) {
-        // Continue
-      }
 
-      throw new Error("Unable to extract structured JSON from Gemini response.");
-    };
-
-    // Retry block for primary structured generation
-    try {
-      console.info("[Backend OCR Logger] Initiating primary structured generation request...");
-      response = await ai.models.generateContent(generateParams);
-      textOutput = response.text || "";
-      isSuccessful = true;
-    } catch (primaryErr: any) {
-      console.error("[Backend OCR Logger] Primary structured generation failed:", primaryErr.message || primaryErr);
-      
-      // If error message indicates image decode/corrupt or invalid format, maps to correct error
-      const lowerErr = (primaryErr.message || "").toLowerCase();
-      if (lowerErr.includes("decode") || lowerErr.includes("corrupt") || lowerErr.includes("malformed")) {
-        return res.json(buildOcrResponse({
-          status: "error",
-          errorType: "CORRUPT_IMAGE"
-        }));
-      }
-
-      // Check if transient and retry
-      if (isTransientError(primaryErr)) {
-        console.warn("[Backend OCR Logger] Error is transient, retrying primary generation with simple backoff delay...");
-        await sleep(2000);
-        try {
-          response = await ai.models.generateContent(generateParams);
-          textOutput = response.text || "";
-          isSuccessful = true;
-        } catch (retryErr: any) {
-          console.error("[Backend OCR Logger] Retry of primary generation failed:", retryErr.message || retryErr);
+        // If it's a transient error or timeout, let it loop and sleep
+        if (isTransientError(err) || errMsgLower.includes("timeout") || errMsgLower.includes("deadline") || errMsgLower.includes("socket")) {
+          continue;
         }
+
+        // Other non-transient failures should abort immediately to save resources
+        break;
       }
     }
 
     // Fallback: If primary structured generation failed, submit a schema-free request and parse manually
     if (!isSuccessful || !textOutput || !textOutput.trim()) {
-      console.warn("[Backend OCR Logger] Initiating robust schema-less fallback request...");
+      console.warn("[Backend OCR Log] ⚠️ Structured OCR failed or exhausted retries. Invoking schema-free fallback...");
       try {
         const fallbackParams = {
           model: "gemini-3.5-flash",
@@ -417,37 +502,71 @@ FALLBACK AND CRITICAL ERROR RULES (If you fail or cannot parse):
             ]
           }
         };
+
+        const fallbackStart = Date.now();
         const fallbackResponse = await ai.models.generateContent(fallbackParams);
+        const elapsed = Date.now() - fallbackStart;
+        geminiProcessingTime += elapsed;
+        const fallbackLatency = (elapsed / 1000).toFixed(2);
+
         textOutput = fallbackResponse.text || "";
+        console.info(`[Backend OCR Log] Fallback schema-free call completed. Latency: ${fallbackLatency}s, Length: ${textOutput.length}`);
       } catch (fallbackErr: any) {
-        console.error("[Backend OCR Logger] Fallback schema-free generation also failed:", fallbackErr.message || fallbackErr);
+        console.error("[Backend OCR Log] 🛑 Fallback schema-free call also failed:", fallbackErr.message || fallbackErr);
+        
+        // Map the original or fallback error to friendly output rather than hardcoded TIMEOUT
+        const finalDiagnostic = analyzeAndMapError(geminiApiError || fallbackErr);
+        const isDev = process.env.NODE_ENV !== "production";
+        const messageToClient = isDev
+          ? `${finalDiagnostic.message}\n\n[Dev Diagnostics]\nError Code: ${finalDiagnostic.errorCode}\nStack: ${(geminiApiError || fallbackErr)?.stack || (geminiApiError || fallbackErr)?.message}`
+          : finalDiagnostic.message;
+
         return res.json(buildOcrResponse({
           status: "error",
-          errorType: "TIMEOUT"
+          errorType: finalDiagnostic.errorType,
+          errorCode: finalDiagnostic.errorCode,
+          message: messageToClient
         }));
       }
     }
 
     // Strict Output Gate: Gemini -> HARD PARSER -> validateOCR -> frontend
+    const parseStart = Date.now();
     const finalResult = validateOCR(hardParser(textOutput));
+    const responseParsingTime = Date.now() - parseStart;
 
-    console.info(
-      "[Backend OCR Logger] Server-Side extraction completed. Status:",
-      finalResult.status,
-      "Extracted length:",
-      finalResult.data.text.length,
-      "Confidence:",
-      finalResult.data.confidence
-    );
+    // Metrics tracking and structured server logging
+    const resolvedOriginalSize = Number(originalSize) || base64Data.length * 3 / 4;
+    const compressedSize = base64Data.length * 3 / 4;
+    const uploadDuration = clientSentTime ? Date.now() - Number(clientSentTime) : null;
+    const totalRequestDuration = Date.now() - startTime;
+    const compressionRatioVal = compressedSize > 0 ? (resolvedOriginalSize / compressedSize).toFixed(2) : "1.00";
+
+    console.info(`============================================================`);
+    console.info(`📊 Backend OCR Diagnostics Metrics:`);
+    console.info(`- Original Upload Size: ${resolvedOriginalSize} bytes (${(resolvedOriginalSize / 1024).toFixed(2)} KB)`);
+    console.info(`- Compressed Size: ${compressedSize} bytes (${(compressedSize / 1024).toFixed(2)} KB)`);
+    console.info(`- Compression Ratio: ${compressionRatioVal}x`);
+    console.info(`- Upload Duration: ${uploadDuration !== null ? `${uploadDuration}ms` : "N/A"}`);
+    console.info(`- Gemini Processing Time: ${geminiProcessingTime}ms (${(geminiProcessingTime / 1000).toFixed(2)}s)`);
+    console.info(`- Response Parsing Time: ${responseParsingTime}ms`);
+    console.info(`- Total Request Duration: ${totalRequestDuration}ms (${(totalRequestDuration / 1000).toFixed(2)}s)`);
+    console.info(`============================================================\n`);
 
     return res.json(finalResult);
 
   } catch (error: any) {
-    console.error("OCR API failed on Server-Side:", error);
-    const errType = isTransientError(error) ? "RATE_LIMIT" : "TIMEOUT";
+    const diagnostic = analyzeAndMapError(error);
+    const isDev = process.env.NODE_ENV !== "production";
+    const messageToClient = isDev
+      ? `${diagnostic.message}\n\n[Dev Diagnostics]\nError Code: ${diagnostic.errorCode}\nStack: ${error?.stack || error?.message}`
+      : diagnostic.message;
+
     return res.json(buildOcrResponse({
       status: "error",
-      errorType: errType
+      errorType: diagnostic.errorType,
+      errorCode: diagnostic.errorCode,
+      message: messageToClient
     }));
   }
 });
