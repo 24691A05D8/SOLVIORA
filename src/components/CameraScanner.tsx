@@ -25,7 +25,7 @@ import { validateOCR } from "../ocrValidator";
 
 interface CameraScannerProps {
   isDark: boolean;
-  onTextScanned: (extractedText: string, solveImmediately: boolean) => void;
+  onTextScanned: (extractedText: string, solveImmediately: boolean, selectedQuestionsList?: string[]) => void;
   isLoadingSolver: boolean;
 }
 
@@ -1029,8 +1029,15 @@ export default function CameraScanner({
 
   // Send output back to Solviora Solver Input
   const handleLoadToSolver = (solveImmediately: boolean) => {
-    if (!extractedResult.trim()) return;
-    onTextScanned(extractedResult, solveImmediately);
+    if (selectedQuestionIds.length > 1) {
+      const selectedQsText = detectedQuestions
+        .filter((q) => selectedQuestionIds.includes(q.id))
+        .map((q) => q.text);
+      onTextScanned(extractedResult, solveImmediately, selectedQsText);
+    } else {
+      if (!extractedResult.trim()) return;
+      onTextScanned(extractedResult, solveImmediately);
+    }
     setIsOpen(false);
     // Cleanup States
     resetCaptured();

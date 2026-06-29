@@ -280,6 +280,13 @@ export default function App() {
   const [aiResult, setAiResult] = useState<string>("");
   const [aiExplanation, setAiExplanation] = useState<string>("");
   const [aiSteps, setAiSteps] = useState<string[]>([]);
+  const [solvedQuestions, setSolvedQuestions] = useState<Array<{
+    question: string;
+    result: string;
+    explanation: string;
+    steps: string[];
+  }>>([]);
+  const [activeSolvedIndex, setActiveSolvedIndex] = useState<number>(0);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string>("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -611,6 +618,8 @@ export default function App() {
     setAiResult("");
     setAiExplanation("");
     setAiSteps([]);
+    setSolvedQuestions([]);
+    setActiveSolvedIndex(0);
     setRetryAttempt(0);
 
     // Diagram Step 1: User Input Captured
@@ -713,6 +722,112 @@ export default function App() {
     }
 
     setIsLoading(false);
+  };
+  
+  // --- MULTI-QUESTION SOLVER WALKTHROUGH ENGINE ---
+  const handleSolveMultiple = async (questions: string[], solveImmediately: boolean) => {
+    if (!questions || questions.length === 0) return;
+
+    setErrorMsg("");
+    setIsLoading(true);
+    setAiResult("");
+    setAiExplanation("");
+    setAiSteps([]);
+    setSolvedQuestions([]);
+    setActiveSolvedIndex(0);
+    setRetryAttempt(0);
+
+    // Switch view to Tutor tab where the results dashboard resides
+    setActiveTab("tutor");
+
+    // Diagram Steps: Simulating sequence
+    setActiveStep(1);
+    await new Promise((r) => setTimeout(r, 450));
+    setActiveStep(2);
+    await new Promise((r) => setTimeout(r, 450));
+    setActiveStep(3);
+
+    try {
+      // Execute each question explanation call separately in parallel
+      const results = await Promise.all(
+        questions.map(async (q) => {
+          try {
+            const response = await fetch("/api/explain", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({ question: q }),
+            });
+
+            if (!response.ok) {
+              throw new Error(`HTTP ${response.status}`);
+            }
+            const data = await response.json();
+            if (data.success) {
+              return {
+                question: q,
+                result: data.result,
+                explanation: data.explanation,
+                steps: data.steps || [],
+                success: true,
+              };
+            } else {
+              return {
+                question: q,
+                result: "Clarification Needed",
+                explanation: `### 1. Problem\nTo solve: ${q}\n\n### 2. Given\nExpression containing invalid syntax or server error.\n\n### 3. Simple Steps\n- The server was unable to generate a detailed walkthrough for this question.\n- Please verify the terms and retry.\n\n### 4. Final Answer\n✅ **The final answer is: Error**\n\n### 5. Quick Tip\nMake sure the equation is readable and mathematically valid.\n\n### 6. Standard Formula or Value\nNo standard table required.`,
+                steps: ["Failed to generate solution steps."],
+                success: false,
+              };
+            }
+          } catch (err) {
+            return {
+              question: q,
+              result: "Connection Timeout",
+              explanation: `### 1. Problem\nTo solve: ${q}\n\n### 2. Given\nA network connection issue.\n\n### 3. Simple Steps\n- A network timeout occurred while trying to connect to the tutor service.\n- Please check your network and retry.\n\n### 4. Final Answer\n✅ **The final answer is: Connection Timeout**\n\n### 5. Quick Tip\nEnsure your device is connected to a stable internet connection.\n\n### 6. Standard Formula or Value\nNo standard table required.`,
+              steps: ["Connection timeout occurred."],
+              success: false,
+            };
+          }
+        })
+      );
+
+      setSolvedQuestions(results);
+      setActiveSolvedIndex(0);
+
+      // Populate single-question fallback state with the first item's details for total backward compatibility
+      const first = results[0];
+      if (first) {
+        setAiResult(first.result);
+        setAiExplanation(first.explanation);
+        setAiSteps(first.steps);
+        setLastSolvedQuestion(first.question);
+      }
+
+      // Add to history
+      saveToHistory({
+        id: Date.now().toString(),
+        type: "ai",
+        input: questions.join("\n\n"),
+        result: `Solved ${questions.length} questions`,
+        explanation: results.map((r, i) => `### Question ${i + 1}: ${r.question}\n\n${r.explanation}`).join("\n\n---\n\n"),
+        steps: results.map((r, i) => `Question ${i + 1}: ${r.result}`),
+        timestamp: Date.now(),
+      });
+
+      setActiveStep(4);
+      await new Promise((r) => setTimeout(r, 500));
+      setActiveStep(5);
+      await new Promise((r) => setTimeout(r, 300));
+      setActiveStep(0);
+    } catch (err) {
+      console.error("[Multi-solve execution failure]", err);
+      setErrorMsg("An unexpected error occurred while resolving these questions.");
+      setActiveStep(0);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const loadPreset = (presetText: string) => {
@@ -983,10 +1098,15 @@ export default function App() {
                       >
                         <CameraScanner
                           isDark={isDark}
-                          onTextScanned={(extractedText, solveImmediately) => {
-                            setAiQuestion(extractedText);
-                            if (solveImmediately) {
-                              handleAiExplain(extractedText);
+                          onTextScanned={(extractedText, solveImmediately, selectedQuestionsList) => {
+                            if (selectedQuestionsList && selectedQuestionsList.length > 1) {
+                              setAiQuestion(extractedText);
+                              handleSolveMultiple(selectedQuestionsList, solveImmediately);
+                            } else {
+                              setAiQuestion(extractedText);
+                              if (solveImmediately) {
+                                handleAiExplain(extractedText);
+                              }
                             }
                           }}
                           isLoadingSolver={isLoading}
@@ -1189,75 +1309,145 @@ export default function App() {
                       </div>
                     ) : (
                       <div className="space-y-5 flex-1" id="ai-results-dashboard">
-                        
-                        {/* THE MASTER VALUE PANEL */}
-                        <div className={`p-5 rounded-2xl border shadow-inner relative group ${
-                          isDark 
-                            ? "bg-[#0b1424] border-slate-800" 
-                            : "bg-slate-50 border-slate-100"
-                        }`} id="master-ai-value-card">
-                          
-                          <div className="flex justify-between items-start">
-                            <span className="text-[10px] font-mono font-bold uppercase tracking-widest text-[#5d8bc5]">
-                              Evaluated Resolution Outcome
-                            </span>
-                            <button
-                              onClick={() => copyToClipboard(aiResult, "ai_outcome")}
-                              className="text-slate-400 hover:text-indigo-400 transition-colors p-1"
-                              title="Copy outcome to clipboard"
-                            >
-                              {copiedId === "ai_outcome" ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5 h-3.5" />}
-                            </button>
+                        {/* MULTI-QUESTION SOLUTION CARD SELECTOR */}
+                        {solvedQuestions.length > 1 && (
+                          <div className={`p-4 rounded-2xl border flex flex-col gap-3 ${
+                            isDark ? "bg-[#0b1424] border-slate-800" : "bg-slate-50 border-slate-150"
+                          }`} id="multi-question-selector-card">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[10px] font-mono font-bold uppercase tracking-widest text-indigo-400">
+                                📚 SOLVED QUESTIONS ({solvedQuestions.length})
+                              </span>
+                              <span className="text-[10px] font-bold text-slate-400">
+                                Click a card below to view solution
+                              </span>
+                            </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5">
+                              {solvedQuestions.map((item, idx) => {
+                                const isCurrent = activeSolvedIndex === idx;
+                                return (
+                                  <button
+                                    key={idx}
+                                    type="button"
+                                    onClick={() => {
+                                      setActiveSolvedIndex(idx);
+                                    }}
+                                    className={`p-3.5 rounded-xl border text-left transition-all relative overflow-hidden group cursor-pointer ${
+                                      isCurrent
+                                        ? isDark
+                                          ? "bg-indigo-950/40 border-indigo-500 shadow-[0_0_10px_rgba(99,102,241,0.2)]"
+                                          : "bg-indigo-50/80 border-indigo-400 shadow-sm"
+                                        : isDark
+                                          ? "bg-slate-900/50 border-slate-800 hover:border-slate-700 hover:bg-slate-850/60"
+                                          : "bg-white border-slate-200 hover:border-slate-350 hover:bg-slate-50"
+                                    }`}
+                                  >
+                                    <div className="flex items-center justify-between mb-1">
+                                      <span className={`text-[10px] font-extrabold uppercase font-mono tracking-wider ${
+                                        isCurrent ? "text-indigo-400" : "text-slate-500"
+                                      }`}>
+                                        Question {idx + 1}
+                                      </span>
+                                      {item.steps.length > 0 && (
+                                        <span className={`text-[9px] px-1.5 py-0.5 rounded-md font-bold uppercase ${
+                                          isCurrent 
+                                            ? "bg-indigo-500/15 text-indigo-400" 
+                                            : "bg-slate-800/40 text-slate-500"
+                                        }`}>
+                                          {item.steps.length} Steps
+                                        </span>
+                                      )}
+                                    </div>
+                                    <p className={`text-xs font-semibold line-clamp-2 leading-relaxed ${
+                                      isCurrent ? (isDark ? "text-white" : "text-slate-800") : (isDark ? "text-slate-400" : "text-slate-600")
+                                    }`}>
+                                      {item.question}
+                                    </p>
+                                  </button>
+                                );
+                              })}
+                            </div>
                           </div>
-                          
-                          <div className={`text-2xl md:text-3xl font-black mt-1.5 font-mono break-all tracking-tight ${
-                            isDark ? 'text-white' : 'text-slate-800'
-                          }`}>
-                            {aiResult}
-                          </div>
-                        </div>
+                        )}
 
-                        {/* SEQUENCED LOGIC BULLETS */}
-                        <div>
-                          <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-3 ml-0.5 flex items-center gap-1.5">
-                            <TrendingUp className="w-4 h-4 text-emerald-500 shrink-0" />
-                            <span>Algorithmic Sequence Steps</span>
-                          </div>
+                        {/* ACTIVE QUESTION DETAIL VIEW */}
+                        <div className="space-y-5">
+                          {solvedQuestions.length > 1 && (
+                            <div className={`p-4 rounded-xl border text-xs font-bold ${isDark ? 'bg-slate-900/40 border-slate-800 text-slate-300' : 'bg-slate-50 border-slate-200 text-slate-700'}`}>
+                              <span className="text-indigo-400 mr-1.5">Selected question text:</span>
+                              <span className="italic">"{solvedQuestions[activeSolvedIndex]?.question}"</span>
+                            </div>
+                          )}
 
-                          <div className="space-y-2.5">
-                            {aiSteps.map((step, index) => (
-                              <div 
-                                key={index}
-                                className={`flex items-start gap-3.5 p-3 rounded-2xl border transition-all ${
-                                  isDark 
-                                    ? "bg-[#162744]/70 border-slate-800/80 hover:bg-[#162744]" 
-                                    : "bg-slate-50 border-slate-150 hover:bg-slate-100/30"
-                                }`}
-                                id={`step-bullet-${index}`}
+                          {/* THE MASTER VALUE PANEL */}
+                          <div className={`p-5 rounded-2xl border shadow-inner relative group ${
+                            isDark 
+                              ? "bg-[#0b1424] border-slate-800" 
+                              : "bg-slate-50 border-slate-100"
+                          }`} id="master-ai-value-card">
+                            
+                            <div className="flex justify-between items-start">
+                              <span className="text-[10px] font-mono font-bold uppercase tracking-widest text-[#5d8bc5]">
+                                Evaluated Resolution Outcome
+                              </span>
+                              <button
+                                onClick={() => copyToClipboard(solvedQuestions.length > 1 ? solvedQuestions[activeSolvedIndex]?.result : aiResult, "ai_outcome")}
+                                className="text-slate-400 hover:text-indigo-400 transition-colors p-1"
+                                title="Copy outcome to clipboard"
                               >
-                                <div className="w-5 h-5 rounded-lg bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 text-[10px] font-extrabold flex items-center justify-center shrink-0 mt-0.5">
-                                  {index + 1}
-                                </div>
-                                <p className={`text-xs font-semibold leading-relaxed ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
-                                  {step}
-                                </p>
-                              </div>
-                            ))}
+                                {copiedId === "ai_outcome" ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5 h-3.5" />}
+                              </button>
+                            </div>
+                            
+                            <div className={`text-2xl md:text-3xl font-black mt-1.5 font-mono break-all tracking-tight ${
+                              isDark ? 'text-white' : 'text-slate-800'
+                            }`}>
+                              {solvedQuestions.length > 1 ? solvedQuestions[activeSolvedIndex]?.result : aiResult}
+                            </div>
                           </div>
-                        </div>
 
-                        {/* DETAILED TUTOR CONTEXT NOTES */}
-                        <div className={`p-5 rounded-2xl border ${
-                          isDark 
-                            ? "bg-emerald-950/15 border-emerald-800/30 text-emerald-300" 
-                            : "bg-emerald-50/60 border-emerald-100 text-emerald-900"
-                        }`} id="tutor-essay-card">
-                          <h4 className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-emerald-600 mb-2">
-                            <Sparkles className="w-3.5 h-3.5 text-emerald-500" />
-                            Tutor Methodology Notes
-                          </h4>
+                          {/* SEQUENCED LOGIC BULLETS */}
                           <div>
-                            {renderExplanation(aiExplanation, isDark)}
+                            <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-3 ml-0.5 flex items-center gap-1.5">
+                              <TrendingUp className="w-4 h-4 text-emerald-500 shrink-0" />
+                              <span>Algorithmic Sequence Steps</span>
+                            </div>
+
+                            <div className="space-y-2.5">
+                              {(solvedQuestions.length > 1 ? solvedQuestions[activeSolvedIndex]?.steps : aiSteps).map((step, index) => (
+                                <div 
+                                  key={index}
+                                  className={`flex items-start gap-3.5 p-3 rounded-2xl border transition-all ${
+                                    isDark 
+                                      ? "bg-[#162744]/70 border-slate-800/80 hover:bg-[#162744]" 
+                                      : "bg-slate-50 border-slate-150 hover:bg-slate-100/30"
+                                  }`}
+                                  id={`step-bullet-${index}`}
+                                >
+                                  <div className="w-5 h-5 rounded-lg bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 text-[10px] font-extrabold flex items-center justify-center shrink-0 mt-0.5">
+                                    {index + 1}
+                                  </div>
+                                  <p className={`text-xs font-semibold leading-relaxed ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
+                                    {step}
+                                  </p>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+
+                          {/* DETAILED TUTOR CONTEXT NOTES */}
+                          <div className={`p-5 rounded-2xl border ${
+                            isDark 
+                              ? "bg-emerald-950/15 border-emerald-800/30 text-emerald-300" 
+                              : "bg-emerald-50/60 border-emerald-100 text-emerald-900"
+                          }`} id="tutor-essay-card">
+                            <h4 className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-emerald-600 mb-2">
+                              <Sparkles className="w-3.5 h-3.5 text-emerald-500" />
+                              Tutor Methodology Notes
+                            </h4>
+                            <div>
+                              {renderExplanation(solvedQuestions.length > 1 ? solvedQuestions[activeSolvedIndex]?.explanation : aiExplanation, isDark)}
+                            </div>
                           </div>
                         </div>
                       </div>
