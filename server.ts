@@ -82,8 +82,14 @@ function getGeminiClient(): GoogleGenAI {
 function isTransientError(error: any): boolean {
   if (!error) return false;
   const errMsg = String(error.message || error).toLowerCase();
+  const status = error.status || error.code;
   
-  if (error.status === 503 || error.code === 503 || error.status === "UNAVAILABLE") {
+  if (
+    status === 503 ||
+    status === "UNAVAILABLE" ||
+    status === 429 ||
+    status === "RESOURCE_EXHAUSTED"
+  ) {
     return true;
   }
   
@@ -91,7 +97,11 @@ function isTransientError(error: any): boolean {
     errMsg.includes("503") ||
     errMsg.includes("unavailable") ||
     errMsg.includes("high demand") ||
-    errMsg.includes("temporary")
+    errMsg.includes("temporary") ||
+    errMsg.includes("429") ||
+    errMsg.includes("quota") ||
+    errMsg.includes("rate limit") ||
+    errMsg.includes("exhausted")
   ) {
     return true;
   }
@@ -279,6 +289,9 @@ app.post("/api/ocr", async (req, res) => {
       }
     }
 
+    // CHECKPOINT 2: Repair any transport corruption where "+" characters were replaced by spaces
+    base64Data = base64Data.replace(/ /g, "+");
+
     // Validate MIME types
     const allowedMimeTypes = ["image/png", "image/jpeg", "image/jpg", "image/webp", "image/heic", "image/heif"];
     if (!allowedMimeTypes.includes(resolvedMimeType.toLowerCase())) {
@@ -353,19 +366,27 @@ FALLBACK AND CRITICAL ERROR RULES (If you fail or cannot parse):
 - If format not supported -> status = 'error', error_type = 'UNSUPPORTED_FORMAT', error_code = 1004
 - If image decoding failure -> status = 'error', error_type = 'CORRUPT_IMAGE', error_code = 1003`;
 
+    // CHECKPOINT 3: Both camelCase and snake_case properties are supplied to be 100% compliant with REST API and SDK representations
     const imagePart = {
       inlineData: {
         mimeType: resolvedMimeType,
+        mime_type: resolvedMimeType,
         data: base64Data,
       },
+      inline_data: {
+        mimeType: resolvedMimeType,
+        mime_type: resolvedMimeType,
+        data: base64Data,
+      }
     };
 
     const textPart = {
       text: ocrPrompt + "\n\nCRITICAL: Return ONLY valid JSON matching this schema.",
     };
 
+    // CHECKPOINT 1: Changed to "gemini-2.5-flash"
     const generateParams = {
-      model: "gemini-3.5-flash",
+      model: "gemini-2.5-flash",
       contents: { parts: [imagePart, textPart] },
       config: {
         responseMimeType: "application/json",
@@ -455,6 +476,19 @@ FALLBACK AND CRITICAL ERROR RULES (If you fail or cannot parse):
 
         console.info(`[Backend OCR Log] [Attempt ${attempt + 1}/${backoffTimes.length}] Dispatching primary generation call to Gemini...`);
         const geminiCallStart = Date.now();
+
+        // CHECKPOINT 4: Log the complete Gemini request (excluding API key)
+        console.info(`[Backend Gemini Request Log] Target Model: ${generateParams.model}, Params: ${JSON.stringify({
+          model: generateParams.model,
+          contents: {
+            parts: [
+              { inlineData: { mimeType: imagePart.inlineData.mimeType, data: `[Base64 length: ${imagePart.inlineData.data.length} chars]` } },
+              textPart
+            ]
+          },
+          config: generateParams.config
+        }, null, 2)}`);
+
         response = await ai.models.generateContent(generateParams);
         const elapsed = Date.now() - geminiCallStart;
         geminiProcessingTime += elapsed;
@@ -464,6 +498,9 @@ FALLBACK AND CRITICAL ERROR RULES (If you fail or cannot parse):
         isSuccessful = true;
         
         console.info(`[Backend OCR Log] [Attempt ${attempt + 1}/${backoffTimes.length}] Call completed successfully. Latency: ${geminiLatency}s, Response character count: ${textOutput.length}`);
+        
+        // CHECKPOINT 4: Log the full response
+        console.info(`[Backend Gemini Response Log] Response Payload: ${JSON.stringify(response, null, 2)}`);
         break; // Succeeded! Break retry loop
       } catch (err: any) {
         geminiApiError = err;
@@ -492,7 +529,7 @@ FALLBACK AND CRITICAL ERROR RULES (If you fail or cannot parse):
       console.warn("[Backend OCR Log] ⚠️ Structured OCR failed or exhausted retries. Invoking schema-free fallback...");
       try {
         const fallbackParams = {
-          model: "gemini-3.5-flash",
+          model: "gemini-2.5-flash", // CHECKPOINT 1: Changed to "gemini-2.5-flash"
           contents: {
             parts: [
               imagePart,
@@ -504,6 +541,18 @@ FALLBACK AND CRITICAL ERROR RULES (If you fail or cannot parse):
         };
 
         const fallbackStart = Date.now();
+        
+        // CHECKPOINT 4: Log fallback request
+        console.info(`[Backend Gemini Fallback Request Log] Target Model: ${fallbackParams.model}, Params: ${JSON.stringify({
+          model: fallbackParams.model,
+          contents: {
+            parts: [
+              { inlineData: { mimeType: imagePart.inlineData.mimeType, data: `[Base64 length: ${imagePart.inlineData.data.length} chars]` } },
+              { text: (fallbackParams.contents.parts[1] as any).text }
+            ]
+          }
+        }, null, 2)}`);
+
         const fallbackResponse = await ai.models.generateContent(fallbackParams);
         const elapsed = Date.now() - fallbackStart;
         geminiProcessingTime += elapsed;
@@ -511,6 +560,9 @@ FALLBACK AND CRITICAL ERROR RULES (If you fail or cannot parse):
 
         textOutput = fallbackResponse.text || "";
         console.info(`[Backend OCR Log] Fallback schema-free call completed. Latency: ${fallbackLatency}s, Length: ${textOutput.length}`);
+        
+        // CHECKPOINT 4: Log fallback response
+        console.info(`[Backend Gemini Fallback Response Log] Response Payload: ${JSON.stringify(fallbackResponse, null, 2)}`);
       } catch (fallbackErr: any) {
         console.error("[Backend OCR Log] 🛑 Fallback schema-free call also failed:", fallbackErr.message || fallbackErr);
         
@@ -532,8 +584,13 @@ FALLBACK AND CRITICAL ERROR RULES (If you fail or cannot parse):
 
     // Strict Output Gate: Gemini -> HARD PARSER -> validateOCR -> frontend
     const parseStart = Date.now();
-    const finalResult = validateOCR(hardParser(textOutput));
+    const finalResult = validateOCR(hardParser(textOutput)) as any;
     const responseParsingTime = Date.now() - parseStart;
+
+    // CHECKPOINT 8: If Gemini returns an error or no text, populate custom message with raw text output so the client can display it for debugging
+    if (finalResult.status === "error") {
+      finalResult.message = finalResult.message || `The OCR pipeline failed or returned empty text. Raw response from Gemini: "${textOutput || '(no text returned)'}"`;
+    }
 
     // Metrics tracking and structured server logging
     const resolvedOriginalSize = Number(originalSize) || base64Data.length * 3 / 4;
@@ -632,7 +689,7 @@ Rules to follow:
 Question: ${question}`;
 
     const generateParams = {
-      model: "gemini-3.5-flash",
+      model: "gemini-2.5-flash",
       contents: promptContents,
       config: {
         // Enforce returning structured JSON matching our strict Schema
@@ -662,25 +719,40 @@ Question: ${question}`;
     };
 
     let response;
-    try {
-      response = await ai.models.generateContent(generateParams);
-    } catch (err: any) {
-      if (isTransientError(err)) {
-        console.warn("Gemini API returned 503/UNAVAILABLE service error. Retrying once with exponential backoff...");
-        await sleep(2000); // 2000ms delay for backoff
-        try {
-          response = await ai.models.generateContent(generateParams);
-        } catch (retryErr: any) {
-          console.error("Retry failed for Gemini API due to persistent 503 status:", retryErr);
-          return res.status(503).json({
-            success: false,
-            error: "⚠️ The AI service is currently experiencing high demand or is temporarily unavailable.\nPlease wait a few moments before requesting a new calculation.",
-          });
-        }
-      } else {
-        // Re-throw any other (non-503) error to let the generic catch handle it safely
-        throw err;
+    const explainBackoffTimes = [1500, 3000]; // Multi-stage backoff
+    let explainSuccess = false;
+    let explainError: any = null;
+
+    for (let attempt = 0; attempt <= explainBackoffTimes.length; attempt++) {
+      if (attempt > 0) {
+        console.warn(`[Backend Explain Log] Transient error detected. Retrying in ${explainBackoffTimes[attempt - 1]}ms... (Attempt ${attempt}/${explainBackoffTimes.length})`);
+        await sleep(explainBackoffTimes[attempt - 1]);
       }
+      try {
+        response = await ai.models.generateContent(generateParams);
+        explainSuccess = true;
+        break;
+      } catch (err: any) {
+        explainError = err;
+        console.error(`[Backend Explain Log] Attempt ${attempt + 1} failed:`, err?.message || err);
+        if (!isTransientError(err)) {
+          break; // Abort retry loop immediately for non-transient failures
+        }
+      }
+    }
+
+    if (!explainSuccess || !response) {
+      const isQuota = String(explainError?.message || explainError).toLowerCase().includes("quota") || explainError?.status === 429;
+      if (isQuota) {
+        return res.status(429).json({
+          success: false,
+          error: "⚠️ You have exceeded the temporary rate limit. Please wait a few seconds before trying again.",
+        });
+      }
+      return res.status(explainError?.status || 500).json({
+        success: false,
+        error: explainError?.message || "An unexpected error occurred during the AI explanation process.",
+      });
     }
 
     /**

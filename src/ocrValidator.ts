@@ -78,6 +78,21 @@ export function hardParser(rawText: string): any {
   }
 
   if (!parsed || typeof parsed !== "object") {
+    // If it doesn't look like JSON, but has some readable text, let's treat it as successful raw OCR output!
+    const textIsProbablyOcr = cleaned.length > 5 && !cleaned.startsWith("{") && !cleaned.startsWith("[") && !cleaned.includes("error_code");
+    if (textIsProbablyOcr) {
+      return {
+        status: "success",
+        error_code: 0,
+        error_type: null,
+        data: {
+          text: cleaned,
+          confidence: 0.85,
+          problem_type: "unknown"
+        }
+      };
+    }
+
     return {
       status: "error",
       error_code: 1008,

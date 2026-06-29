@@ -349,6 +349,12 @@ export default function App() {
           throw new Error(`API_ERROR: HTTP ${response.status} - ${responseBody || response.statusText}`);
         }
 
+        const contentType = response.headers.get("content-type") || "";
+        if (!contentType.includes("application/json")) {
+          const rawText = await response.text().catch(() => "");
+          throw new Error(`Expected JSON response but received Content-Type: "${contentType}". Body: ${rawText.substring(0, 200)}`);
+        }
+
         const data = await response.json();
 
         if (data.success) {

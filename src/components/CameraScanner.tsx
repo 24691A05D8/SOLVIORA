@@ -1578,6 +1578,14 @@ export default function CameraScanner({
                       /* REQUIREMENT 2: HIGH TECH DYNAMIC CONFIDENCE CHIP FLAGS */
                       <div className="flex flex-wrap items-center justify-between gap-3 p-4 rounded-2xl border border-slate-800 bg-[#090f19]">
                         <div className="flex items-center gap-2">
+                          {/* FAILED / ERROR STATE */}
+                          {ocrError && (
+                            <div className="flex items-center gap-1.5 px-3 py-1 bg-rose-500/10 border border-rose-500/25 text-rose-400 rounded-full text-[10px] font-black uppercase tracking-wider">
+                              <span className="w-1.5 h-1.5 bg-rose-400 rounded-full animate-pulse"></span>
+                              <span>❌ OCR Failed</span>
+                            </div>
+                          )}
+
                           {/* HIGH CONFIDENCE 90%+ */}
                           {ocrConfidencePercent && ocrConfidencePercent >= 90 && (
                             <div className="flex items-center gap-1.5 px-3 py-1 bg-emerald-500/10 border border-emerald-500/25 text-emerald-400 rounded-full text-[10px] font-black uppercase tracking-wider">
@@ -1652,7 +1660,7 @@ export default function CameraScanner({
                         <div className="border border-slate-850 rounded-2xl p-3 bg-[#0a101d] space-y-3 shadow-inner">
                           <div className="relative rounded-xl overflow-hidden border border-slate-800 flex items-center justify-center bg-black">
                             <img
-                              src={sourceImage || ""}
+                              src={croppedImage || sourceImage || ""}
                               alt="Captured Source Image"
                               className="w-full h-auto max-h-[300px] object-contain block"
                             />
@@ -1698,8 +1706,8 @@ export default function CameraScanner({
                           <div className="space-y-2 text-[11px] font-mono text-slate-400 pt-1">
                             <div className="flex items-center justify-between border-b border-slate-850 pb-1.5">
                               <span className="text-slate-500">Confidence:</span>
-                              <span className={`font-bold ${ocrConfidencePercent && ocrConfidencePercent >= 90 ? "text-emerald-400" : "text-amber-400"}`}>
-                                {ocrConfidencePercent ? `${ocrConfidencePercent}%` : "Pending"}
+                              <span className={`font-bold ${ocrConfidencePercent && ocrConfidencePercent >= 90 ? "text-emerald-400" : (ocrError ? "text-rose-400" : "text-amber-400")}`}>
+                                {ocrConfidencePercent ? `${ocrConfidencePercent}%` : (ocrError ? "Failed" : "Pending")}
                               </span>
                             </div>
 
