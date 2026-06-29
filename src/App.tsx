@@ -48,7 +48,10 @@ import {
   Sparkle,
   Terminal,
   HelpCircle,
-  RefreshCw
+  RefreshCw,
+  CheckCircle2,
+  Circle,
+  Loader2
 } from "lucide-react";
 import { CalculationItem } from "./types";
 import { motion, AnimatePresence } from "motion/react";
@@ -298,6 +301,7 @@ export default function App() {
 
   // Diagnostics Progress Indicator (0 to 5 matching the diagram steps)
   const [activeStep, setActiveStep] = useState<number>(0);
+  const [sourceType, setSourceType] = useState<"manual" | "camera">("manual");
 
   // Load calculation logs from local storage on mount
   useEffect(() => {
@@ -622,19 +626,18 @@ export default function App() {
     setActiveSolvedIndex(0);
     setRetryAttempt(0);
 
-    // Diagram Step 1: User Input Captured
-    setActiveStep(1);
+    // Dynamic Phase Tracker steps animation
+    if (sourceType === "camera") {
+      // Phase 1 and 2 are already completed by OCR
+      setActiveStep(3); // Start with Phase 3 (Understanding the problem)
+    } else {
+      // Manual/Preset starts with Phase 3 too
+      setActiveStep(3);
+    }
     await new Promise((r) => setTimeout(r, 450));
-
-    // Diagram Step 2: Frontend prepares packet
-    setActiveStep(2);
-    await new Promise((r) => setTimeout(r, 450));
-
-    // Diagram Step 3: Backend securely proxies request
-    setActiveStep(3);
 
     const maxRetries = 3;
-    const retryDelays = [2000, 4000, 8000]; // 2s, 4s, 8s backoff delays as requested
+    const retryDelays = [1000, 2000, 3000]; // 1s, 2s, 3s backoff delays as requested
     let success = false;
     let attempt = 0;
 
@@ -643,22 +646,32 @@ export default function App() {
         setRetryAttempt(attempt);
         const delayMs = retryDelays[attempt - 1];
         console.warn(`[AI Retry System] Attempt ${attempt}/${maxRetries} failed. Retrying in ${delayMs}ms...`);
+        setErrorMsg("Taking a little longer than expected... Retrying automatically...");
         await new Promise((r) => setTimeout(r, delayMs));
       }
 
+      // Establish a strict 12-second client-side timeout using AbortController (as requested: 10-15 seconds)
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => {
+        controller.abort();
+      }, 12000); // 12 seconds timeout
+
       try {
+        console.info(`[AI Client Log] Dispatching request to /api/explain. Attempt ${attempt + 1}/${maxRetries + 1}`);
         const response = await fetch("/api/explain", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({ question: promptText }),
+          signal: controller.signal,
         });
 
-        // 5. Detect and handle various categories of error statuses
+        clearTimeout(timeoutId);
+
+        // Detect and handle various categories of error statuses
         if (!response.ok) {
           const responseBody = await response.text().catch(() => "");
-          // 6. Log the complete API error in the browser console for debugging
           console.error(`[AI API Error Log] Status: ${response.status} ${response.statusText}`, {
             status: response.status,
             statusText: response.statusText,
@@ -667,7 +680,12 @@ export default function App() {
             attempt: attempt + 1
           });
 
-          throw new Error(`API_ERROR: HTTP ${response.status} - ${responseBody || response.statusText}`);
+          // Check if this is a 400-level validation error (other than 429 Rate Limit)
+          if (response.status >= 400 && response.status < 500 && response.status !== 429) {
+            throw new Error(`API_ERROR_NON_RETRYABLE: HTTP ${response.status} - ${responseBody || response.statusText}`);
+          }
+
+          throw new Error(`API_ERROR_RETRYABLE: HTTP ${response.status} - ${responseBody || response.statusText}`);
         }
 
         const contentType = response.headers.get("content-type") || "";
@@ -679,11 +697,14 @@ export default function App() {
         const data = await response.json();
 
         if (data.success) {
-          // Diagram Step 4: AI Model Thinking parallel animation
+          // Clear error messages before finalizing
+          setErrorMsg("");
+
+          // Phase 4: Generating solution
           setActiveStep(4);
           await new Promise((r) => setTimeout(r, 700));
 
-          // Diagram Step 5: Rendering data callback
+          // Phase 5: Finalizing response
           setActiveStep(5);
           setAiResult(data.result);
           setAiExplanation(data.explanation);
@@ -702,18 +723,32 @@ export default function App() {
 
           success = true;
           setRetryAttempt(0);
+          await new Promise((r) => setTimeout(r, 500));
+          setActiveStep(0); // Completed!
         } else {
-          // 6. Log the complete API error in the browser console for debugging
           console.error(`[AI API Error Log] Server returned successful HTTP response but failed solver payload:`, data);
           throw new Error(data.error || "The server could not solve this math statement.");
         }
       } catch (err: any) {
-        // 6. Log the complete API error in the browser console for debugging
+        clearTimeout(timeoutId);
+        const isTimeout = err.name === "AbortError" || String(err?.message || err).toLowerCase().includes("timeout");
         console.error(`[AI Solviora Solver] Attempt ${attempt + 1}/${maxRetries + 1} failed:`, err);
-        
+
+        const errMsg = String(err?.message || err);
+        if (errMsg.includes("API_ERROR_NON_RETRYABLE")) {
+          const cleanMsg = errMsg.replace("API_ERROR_NON_RETRYABLE:", "").trim();
+          setErrorMsg(cleanMsg || "Invalid mathematical statement. Please verify the terms and retry.");
+          setActiveStep(0);
+          break; // Stop retrying immediately for non-retryable errors
+        }
+
+        if (isTimeout) {
+          setErrorMsg("Still processing. Retrying...");
+        }
+
         attempt++;
         if (attempt > maxRetries) {
-          // 4. If all retries fail: display friendly message, keep user input preserved
+          // If all retries fail: display friendly message, keep user input preserved
           setErrorMsg("The AI service is temporarily busy. Your question has been saved. Please try again in a few moments.");
           setActiveStep(0);
           setRetryAttempt(0);
@@ -740,58 +775,103 @@ export default function App() {
     // Switch view to Tutor tab where the results dashboard resides
     setActiveTab("tutor");
 
-    // Diagram Steps: Simulating sequence
-    setActiveStep(1);
+    // Dynamic Phase Tracker steps animation
+    if (sourceType === "camera") {
+      setActiveStep(3); // Start with Phase 3 (Understanding the problem)
+    } else {
+      setActiveStep(3);
+    }
     await new Promise((r) => setTimeout(r, 450));
-    setActiveStep(2);
-    await new Promise((r) => setTimeout(r, 450));
-    setActiveStep(3);
 
     try {
-      // Execute each question explanation call separately in parallel
+      // Execute each question explanation call separately in parallel, each with its own retry + timeout logic
       const results = await Promise.all(
         questions.map(async (q) => {
-          try {
-            const response = await fetch("/api/explain", {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({ question: q }),
-            });
+          const maxRetries = 3;
+          const retryDelays = [1000, 2000, 3000];
+          let attempt = 0;
+          let success = false;
+          let lastErr: any = null;
 
-            if (!response.ok) {
-              throw new Error(`HTTP ${response.status}`);
+          while (attempt <= maxRetries && !success) {
+            if (attempt > 0) {
+              const delayMs = retryDelays[attempt - 1];
+              console.warn(`[AI Multi-Retry] Question: "${q.substring(0, 30)}..." - Attempt ${attempt}/${maxRetries} failed. Retrying in ${delayMs}ms...`);
+              await new Promise((r) => setTimeout(r, delayMs));
             }
-            const data = await response.json();
-            if (data.success) {
-              return {
-                question: q,
-                result: data.result,
-                explanation: data.explanation,
-                steps: data.steps || [],
-                success: true,
-              };
-            } else {
-              return {
-                question: q,
-                result: "Clarification Needed",
-                explanation: `### 1. Problem\nTo solve: ${q}\n\n### 2. Given\nExpression containing invalid syntax or server error.\n\n### 3. Simple Steps\n- The server was unable to generate a detailed walkthrough for this question.\n- Please verify the terms and retry.\n\n### 4. Final Answer\n✅ **The final answer is: Error**\n\n### 5. Quick Tip\nMake sure the equation is readable and mathematically valid.\n\n### 6. Standard Formula or Value\nNo standard table required.`,
-                steps: ["Failed to generate solution steps."],
-                success: false,
-              };
+
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => {
+              controller.abort();
+            }, 12000); // 12 seconds timeout per question
+
+            try {
+              const response = await fetch("/api/explain", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({ question: q }),
+                signal: controller.signal,
+              });
+
+              clearTimeout(timeoutId);
+
+              if (!response.ok) {
+                const responseBody = await response.text().catch(() => "");
+                if (response.status >= 400 && response.status < 500 && response.status !== 429) {
+                  throw new Error(`API_ERROR_NON_RETRYABLE: HTTP ${response.status} - ${responseBody || response.statusText}`);
+                }
+                throw new Error(`HTTP ${response.status}`);
+              }
+
+              const data = await response.json();
+              if (data.success) {
+                return {
+                  question: q,
+                  result: data.result,
+                  explanation: data.explanation,
+                  steps: data.steps || [],
+                  success: true,
+                };
+              } else {
+                throw new Error(data.error || "Solver failed");
+              }
+            } catch (err: any) {
+              clearTimeout(timeoutId);
+              lastErr = err;
+              const errMsg = String(err?.message || err);
+              if (errMsg.includes("API_ERROR_NON_RETRYABLE")) {
+                break; // Stop retrying immediately for non-retryable 400-level errors
+              }
+              attempt++;
             }
-          } catch (err) {
-            return {
-              question: q,
-              result: "Connection Timeout",
-              explanation: `### 1. Problem\nTo solve: ${q}\n\n### 2. Given\nA network connection issue.\n\n### 3. Simple Steps\n- A network timeout occurred while trying to connect to the tutor service.\n- Please check your network and retry.\n\n### 4. Final Answer\n✅ **The final answer is: Connection Timeout**\n\n### 5. Quick Tip\nEnsure your device is connected to a stable internet connection.\n\n### 6. Standard Formula or Value\nNo standard table required.`,
-              steps: ["Connection timeout occurred."],
-              success: false,
-            };
           }
+
+          // Return standard user-friendly fallback if all retries failed or met a non-retryable error
+          const cleanErrStr = String(lastErr?.message || lastErr || "Failed to generate solution steps.");
+          const isNonRetryable = cleanErrStr.includes("API_ERROR_NON_RETRYABLE");
+          const errorHeading = isNonRetryable ? "Invalid Syntax" : "Connection Timeout";
+          const errorDetails = isNonRetryable 
+            ? "The server was unable to generate a detailed walkthrough for this question due to an invalid mathematical expression or syntax error."
+            : "A network timeout or service overload occurred while trying to connect to the tutor service.";
+
+          return {
+            question: q,
+            result: isNonRetryable ? "Error" : "Timeout",
+            explanation: `### 1. Problem\nTo solve: ${q}\n\n### 2. Given\n${isNonRetryable ? "Expression containing syntax or validation error." : "A network connection issue or service delay."}\n\n### 3. Simple Steps\n- ${errorDetails}\n- Please check the question contents and try clicking below to retry.\n\n### 4. Final Answer\n✅ **The final answer is: ${errorHeading}**\n\n### 5. Quick Tip\nEnsure your equation is clearly formulated and complete.\n\n### 6. Standard Formula or Value\nNo standard table required.`,
+            steps: [isNonRetryable ? "Syntax verification failed." : "Connection timeout occurred."],
+            success: false,
+          };
         })
       );
+
+      // Phase 4: Generating solution
+      setActiveStep(4);
+      await new Promise((r) => setTimeout(r, 700));
+
+      // Phase 5: Finalizing response
+      setActiveStep(5);
 
       setSolvedQuestions(results);
       setActiveSolvedIndex(0);
@@ -816,14 +896,11 @@ export default function App() {
         timestamp: Date.now(),
       });
 
-      setActiveStep(4);
       await new Promise((r) => setTimeout(r, 500));
-      setActiveStep(5);
-      await new Promise((r) => setTimeout(r, 300));
-      setActiveStep(0);
+      setActiveStep(0); // Completed!
     } catch (err) {
       console.error("[Multi-solve execution failure]", err);
-      setErrorMsg("An unexpected error occurred while resolving these questions.");
+      setErrorMsg("Our math tutor engine is currently busy or offline. Please retry in a few moments.");
       setActiveStep(0);
     } finally {
       setIsLoading(false);
@@ -832,6 +909,7 @@ export default function App() {
 
   const loadPreset = (presetText: string) => {
     setAiQuestion(presetText);
+    setSourceType("manual");
     handleAiExplain(presetText);
   };
 
@@ -839,6 +917,7 @@ export default function App() {
   const promoteToAiTutor = (originalExpression: string, fallbackVal?: string) => {
     const defaultQuery = `Explain calculation ${originalExpression} with solution ${fallbackVal || ""}`;
     setAiQuestion(defaultQuery);
+    setSourceType("manual");
     setActiveTab("tutor");
     handleAiExplain(defaultQuery);
   };
@@ -1283,29 +1362,148 @@ export default function App() {
                         </p>
                       </div>
                     ) : isLoading && !aiResult ? (
-                      <div className="flex-1 flex flex-col items-center justify-center text-center p-8 min-h-[220px]">
-                        <div className="relative w-14 h-14 mb-4">
-                          <div className="absolute inset-0 rounded-full border-4 border-indigo-500/20 border-t-indigo-500 animate-spin"></div>
-                          <div className="absolute inset-2 bg-indigo-500/5 rounded-full flex items-center justify-center text-indigo-400">
-                            <Sparkle className="w-4 h-4 animate-ping" />
+                      <div className={`flex-1 flex flex-col p-6 sm:p-8 rounded-2xl border transition-all ${
+                        isDark ? "bg-[#0b1424] border-slate-800" : "bg-slate-50 border-slate-200"
+                      }`} id="tutor-pipeline-loader">
+                        {/* Title and overall status indicator */}
+                        <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pb-5 border-b border-dashed border-slate-700/25 mb-6">
+                          <div className="flex items-center gap-3">
+                            <div className="relative w-10 h-10 shrink-0">
+                              <div className="absolute inset-0 rounded-full border-2 border-indigo-500/25 border-t-indigo-500 animate-spin"></div>
+                              <div className="absolute inset-1.5 bg-indigo-500/5 rounded-full flex items-center justify-center text-indigo-400">
+                                <Sparkle className="w-3.5 h-3.5 animate-pulse" />
+                              </div>
+                            </div>
+                            <div className="text-left">
+                              <h4 className="font-extrabold text-sm text-indigo-400 tracking-tight">AI Tutor Processing Pipeline</h4>
+                              <p className="text-[10px] text-slate-500 uppercase font-mono tracking-wider">
+                                {retryAttempt > 0 ? "Network retry mode active" : "Evaluating logic securely"}
+                              </p>
+                            </div>
                           </div>
-                        </div>
-                        <h4 className="font-bold text-sm tracking-tight text-indigo-400">
+                          
                           {retryAttempt > 0 ? (
-                            `Retrying... (${retryAttempt}/3)`
+                            <div className="px-3 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/25 flex items-center gap-2">
+                              <Loader2 className="w-3.5 h-3.5 text-amber-400 animate-spin" />
+                              <span className="text-[10px] font-black uppercase text-amber-400 tracking-wider">
+                                Retrying... ({retryAttempt}/3)
+                              </span>
+                            </div>
                           ) : (
-                            <>
-                              {activeStep === 1 && "Analyzing input question..."}
-                              {activeStep === 2 && "Decomposing calculation..."}
-                              {activeStep === 3 && "Connecting to AI Tutor..."}
-                              {activeStep === 4 && "Generating solution steps..."}
-                              {activeStep === 5 && "Formatting results..."}
-                            </>
+                            <div className="px-3 py-1.5 rounded-lg bg-indigo-500/10 border border-indigo-500/25 flex items-center gap-2">
+                              <Loader2 className="w-3.5 h-3.5 text-indigo-400 animate-spin" />
+                              <span className="text-[10px] font-black uppercase text-indigo-400 tracking-wider">
+                                Processing
+                              </span>
+                            </div>
                           )}
-                        </h4>
-                        <p className="text-[10px] text-slate-400 uppercase mt-1">
-                          {retryAttempt > 0 ? "Transient busy state. Retrying automatically..." : "Evaluating logic securely..."}
-                        </p>
+                        </div>
+
+                        {/* Interactive tracker timeline */}
+                        <div className="space-y-4 max-w-md mx-auto w-full">
+                          {[
+                            { id: 1, name: "Analyzing input question", desc: "Extracting problem details via OCR" },
+                            { id: 2, name: "Decomposing calculation", desc: "Isolating terms and structures" },
+                            { id: 3, name: "Connecting to AI Tutor", desc: "Dispatching mathematical request" },
+                            { id: 4, name: "Generating solution steps", desc: "Synthesizing educational walkthrough" },
+                            { id: 5, name: "Formatting results", desc: "Rendering clean equations and tables" },
+                          ].map((p, idx) => {
+                            // Determine phase status
+                            let status: "completed" | "active" | "skipped" | "pending" = "pending";
+                            if (sourceType === "manual") {
+                              if (p.id === 1 || p.id === 2) {
+                                status = "skipped";
+                              } else if (activeStep === p.id) {
+                                status = "active";
+                              } else if (activeStep > p.id) {
+                                status = "completed";
+                              }
+                            } else {
+                              // camera sourceType
+                              if (p.id === 1 || p.id === 2) {
+                                status = "completed";
+                              } else if (activeStep === p.id) {
+                                status = "active";
+                              } else if (activeStep > p.id) {
+                                status = "completed";
+                              }
+                            }
+
+                            return (
+                              <div key={p.id} className="relative flex items-start gap-4 text-left group">
+                                {/* Vertical connection line between steps */}
+                                {idx < 4 && (
+                                  <div className={`absolute left-4 top-8 bottom-0 w-[2px] -ml-[1px] transition-all duration-500 ${
+                                    status === "completed" 
+                                      ? "bg-emerald-500/50" 
+                                      : status === "skipped" 
+                                        ? "bg-slate-700/20" 
+                                        : "bg-slate-700/15"
+                                  }`} />
+                                )}
+
+                                {/* Bullet/Badge circle */}
+                                <div className="z-10 shrink-0">
+                                  {status === "completed" ? (
+                                    <div className="w-8 h-8 rounded-full bg-emerald-500/10 border border-emerald-500/40 flex items-center justify-center text-emerald-400 shadow-[0_0_10px_rgba(16,185,129,0.15)]">
+                                      <CheckCircle2 className="w-4 h-4" />
+                                    </div>
+                                  ) : status === "active" ? (
+                                    <div className="w-8 h-8 rounded-full bg-indigo-500/20 border-2 border-indigo-500 flex items-center justify-center text-indigo-400 shadow-[0_0_15px_rgba(99,102,241,0.4)] animate-pulse">
+                                      <Loader2 className="w-4 h-4 animate-spin" />
+                                    </div>
+                                  ) : status === "skipped" ? (
+                                    <div className="w-8 h-8 rounded-full bg-slate-800/40 border border-dashed border-slate-700 flex items-center justify-center text-slate-500 text-[10px] font-bold">
+                                      —
+                                    </div>
+                                  ) : (
+                                    <div className="w-8 h-8 rounded-full bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-500">
+                                      <Circle className="w-3.5 h-3.5" />
+                                    </div>
+                                  )}
+                                </div>
+
+                                {/* Step details */}
+                                <div className="flex-1 min-w-0 pt-0.5">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <h5 className={`text-xs font-bold transition-all duration-300 ${
+                                      status === "completed" 
+                                        ? "text-slate-300 line-through opacity-60" 
+                                        : status === "active" 
+                                          ? "text-indigo-400 scale-[1.01]" 
+                                          : status === "skipped" 
+                                            ? "text-slate-500 italic" 
+                                            : "text-slate-400"
+                                    }`}>
+                                      {p.name}
+                                    </h5>
+                                    
+                                    {/* Status Pill Badge */}
+                                    <span className={`text-[9px] font-black uppercase px-2 py-0.5 rounded-md border tracking-wider shrink-0 transition-all ${
+                                      status === "completed"
+                                        ? "bg-emerald-500/5 border-emerald-500/20 text-emerald-500"
+                                        : status === "active"
+                                          ? "bg-indigo-500/10 border-indigo-500/35 text-indigo-400 animate-pulse"
+                                          : status === "skipped"
+                                            ? "bg-slate-800/10 border-slate-700/20 text-slate-500"
+                                            : "bg-slate-900 border-slate-800 text-slate-500"
+                                    }`}>
+                                      {status === "completed" && "Completed"}
+                                      {status === "active" && "Active"}
+                                      {status === "skipped" && "Skipped"}
+                                      {status === "pending" && "Pending"}
+                                    </span>
+                                  </div>
+                                  <p className={`text-[10px] mt-0.5 transition-all truncate ${
+                                    status === "active" ? "text-indigo-300/80" : "text-slate-500"
+                                  }`}>
+                                    {p.desc}
+                                  </p>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
                       </div>
                     ) : (
                       <div className="space-y-5 flex-1" id="ai-results-dashboard">

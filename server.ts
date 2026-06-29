@@ -634,21 +634,31 @@ FALLBACK AND CRITICAL ERROR RULES (If you fail or cannot parse):
  * communicates with the Gemini model, receives the response, and formats it as JSON.
  */
 app.post("/api/explain", async (req, res) => {
+  const startTime = Date.now();
+  let questionText = "";
   try {
     const { question } = req.body;
+    questionText = question;
 
     if (!question || typeof question !== "string" || question.trim() === "") {
+      console.warn(`[Backend Explain Log] ⚠️ Bad Request received at ${new Date().toISOString()}: Invalid question text.`);
       return res.status(400).json({
         success: false,
         error: "Please enter a valid natural language math question.",
       });
     }
 
+    console.info(`\n============================================================`);
+    console.info(`[Backend Explain Log] 📥 RECEIVED EXPLAIN REQUEST AT ${new Date().toISOString()}`);
+    console.info(`- Question: "${question.substring(0, 150)}${question.length > 150 ? "..." : ""}"`);
+    console.info(`============================================================`);
+
     // Lazily get initialized Gemini API client (Throws clear error message if key is missing)
     let ai;
     try {
       ai = getGeminiClient();
     } catch (keyError: any) {
+      console.error(`[Backend Explain Log] 🛑 Missing API Key context:`, keyError.message);
       return res.status(500).json({
         success: false,
         error: `Configuration Error: ${keyError.message}`,
@@ -730,6 +740,7 @@ Question: ${question}`;
     const explainBackoffTimes = [1500, 3000]; // Multi-stage backoff
     let explainSuccess = false;
     let explainError: any = null;
+    let geminiProcessingTime = 0;
 
     for (let attempt = 0; attempt <= explainBackoffTimes.length; attempt++) {
       if (attempt > 0) {
@@ -737,12 +748,17 @@ Question: ${question}`;
         await sleep(explainBackoffTimes[attempt - 1]);
       }
       try {
+        console.info(`[Backend Explain Log] [Attempt ${attempt + 1}/${explainBackoffTimes.length + 1}] Dispatching explain call to Gemini...`);
+        const geminiCallStart = Date.now();
         response = await ai.models.generateContent(generateParams);
+        const elapsed = Date.now() - geminiCallStart;
+        geminiProcessingTime += elapsed;
+        console.info(`[Backend Explain Log] [Attempt ${attempt + 1}] Call completed successfully. Latency: ${elapsed}ms (${(elapsed / 1000).toFixed(2)}s)`);
         explainSuccess = true;
         break;
       } catch (err: any) {
         explainError = err;
-        console.error(`[Backend Explain Log] Attempt ${attempt + 1} failed:`, err?.message || err);
+        console.error(`[Backend Explain Log] [Attempt ${attempt + 1}] Failed with error:`, err?.message || err);
         if (!isTransientError(err)) {
           break; // Abort retry loop immediately for non-transient failures
         }
@@ -757,9 +773,10 @@ Question: ${question}`;
           error: "⚠️ You have exceeded the temporary rate limit. Please wait a few seconds before trying again.",
         });
       }
+      const diagnostic = analyzeAndMapError(explainError);
       return res.status(explainError?.status || 500).json({
         success: false,
-        error: explainError?.message || "An unexpected error occurred during the AI explanation process.",
+        error: diagnostic.message || "An unexpected error occurred during the AI explanation process.",
       });
     }
 
@@ -774,6 +791,14 @@ Question: ${question}`;
     }
 
     const parsedData = JSON.parse(textOutput.trim());
+    const totalRequestDuration = Date.now() - startTime;
+
+    console.info(`============================================================`);
+    console.info(`📊 Backend Explain Diagnostics Metrics:`);
+    console.info(`- Question: "${questionText.substring(0, 100)}${questionText.length > 100 ? "..." : ""}"`);
+    console.info(`- Gemini API Latency: ${geminiProcessingTime}ms (${(geminiProcessingTime / 1000).toFixed(2)}s)`);
+    console.info(`- Total Server Processing Time: ${totalRequestDuration}ms (${(totalRequestDuration / 1000).toFixed(2)}s)`);
+    console.info(`============================================================\n`);
 
     return res.json({
       success: true,
@@ -783,10 +808,12 @@ Question: ${question}`;
     });
 
   } catch (error: any) {
-    console.error("AI processing failed on Server-Side:", error);
+    const totalRequestDuration = Date.now() - startTime;
+    console.error(`AI processing failed on Server-Side after ${totalRequestDuration}ms:`, error);
+    const diagnostic = analyzeAndMapError(error);
     return res.status(500).json({
       success: false,
-      error: error.message || "An internal error occurred during the AI explanation process.",
+      error: diagnostic.message || "An internal error occurred during the AI explanation process.",
     });
   }
 });
