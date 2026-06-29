@@ -288,9 +288,9 @@ export default function CameraScanner({
   useEffect(() => {
     if (!isOcrProcessing) return;
     const texts = [
-      "Analyzing image...",
-      "Detecting text...",
-      "Recognizing mathematical expressions..."
+      "Scanning image...",
+      "Extracting text...",
+      "Understanding your question..."
     ];
     let currentIndex = 0;
     setLoadingText(texts[0]);
@@ -304,6 +304,8 @@ export default function CameraScanner({
   // Refs
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const ocrCacheRef = useRef<Record<string, any>>({});
+  const activeOcrAbortControllerRef = useRef<AbortController | null>(null);
 
   // Load Scan History from LocalStorage on mount
   useEffect(() => {
@@ -732,6 +734,52 @@ export default function CameraScanner({
     setOcrConfidencePercent(null);
     setIsDeveloperDetailsExp(false);
 
+    // 1. Cancel duplicate requests
+    if (activeOcrAbortControllerRef.current) {
+      console.warn("[OCR Action] Aborting previous pending OCR request to avoid duplicates...");
+      activeOcrAbortControllerRef.current.abort();
+    }
+    const ocrController = new AbortController();
+    activeOcrAbortControllerRef.current = ocrController;
+
+    // 2. Check if this exact image base64 has already been cached
+    if (ocrCacheRef.current[imageB64]) {
+      console.info("[OCR Cache] Cache hit! Returning identical OCR result for cached image.");
+      const data = ocrCacheRef.current[imageB64];
+      const extractedText = data.data?.text || data.data?.extracted_text || "";
+      if (extractedText.trim()) {
+        const confidenceVal = typeof data.data?.confidence === "number" ? data.data.confidence : 0.95;
+        const scorePercent = Math.max(10, Math.min(99, Math.round(confidenceVal * 100)));
+        
+        setOcrConfidencePercent(scorePercent);
+        setOcrConfidence(confidenceVal >= 0.70 ? "high" : "low");
+        setOcrConfidenceReason(`Cached Multimodal OCR pattern returned successfully.`);
+        
+        const isMathOrText = data.data?.problem_type === "math" || data.data?.problem_type === "text" || data.data?.problem_type === "unknown";
+        setIsQuestion(isMathOrText);
+
+        const questions = Array.isArray(data.data?.questions) ? data.data.questions : [];
+        const resolvedQuestions = questions.length > 0 ? questions : [{
+          id: "q1",
+          text: extractedText,
+          box: { ymin: 0, xmin: 0, ymax: 100, xmax: 100 }
+        }];
+
+        setDetectedQuestions(resolvedQuestions);
+        if (resolvedQuestions.length === 1) {
+          setExtractedResult(resolvedQuestions[0].text);
+          setSelectedQuestionIds([resolvedQuestions[0].id]);
+        } else {
+          setSelectedQuestionIds([]);
+          setExtractedResult("");
+        }
+        
+        setIsOcrProcessing(false);
+        activeOcrAbortControllerRef.current = null;
+        return;
+      }
+    }
+
     // Helper utility to convert base64 image strings to raw Blobs
     const dataURLtoBlob = (dataurl: string) => {
       try {
@@ -799,7 +847,8 @@ export default function CameraScanner({
     const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
     
     let attempt = 0;
-    const maxRetries = 1; // Retry once automatically for transient network failures as requested
+    const maxRetries = 3; // Retry up to 3 times with exponential backoff (total 4 attempts)
+    const retryDelays = [2000, 4000, 8000]; // 2s, 4s, 8s backoff delays
     let lastErr: any = null;
     let finalSuccess = false;
     let fallbackText = "";
@@ -809,9 +858,9 @@ export default function CameraScanner({
     while (attempt <= maxRetries) {
       try {
         if (attempt > 0) {
-          // Retry delay (2 seconds)
-          const delayMs = 2000;
-          console.warn(`[OCR Retry System] Transient error detected. Retrying once in ${delayMs}ms... (Attempt ${attempt}/${maxRetries})`);
+          const delayMs = retryDelays[attempt - 1];
+          console.warn(`[OCR Retry System] Transient error detected. Retrying in ${delayMs}ms... (Attempt ${attempt}/${maxRetries})`);
+          setOcrError("Solviora is experiencing high demand. Please wait while we automatically retry.");
           await sleep(delayMs);
         }
 
@@ -820,6 +869,10 @@ export default function CameraScanner({
         const timeoutId = setTimeout(() => {
           controller.abort();
         }, 40000);
+
+        // Link with ocrController to cancel requests properly
+        const onAbort = () => controller.abort();
+        ocrController.signal.addEventListener("abort", onAbort);
 
         let response;
         const fetchStart = Date.now();
@@ -839,6 +892,7 @@ export default function CameraScanner({
           });
         } finally {
           clearTimeout(timeoutId);
+          ocrController.signal.removeEventListener("abort", onAbort);
         }
 
         const contentType = response.headers.get("content-type") || "";
@@ -889,7 +943,7 @@ export default function CameraScanner({
           
           setOcrConfidencePercent(scorePercent);
           setOcrConfidence(confidenceVal >= 0.70 ? "high" : "low");
-          setOcrConfidenceReason(`Multimodal OCR pattern completed successfully (Code: ${data.error_code || 0}).`);
+          setOcrConfidenceReason(`Multimodal OCR pattern completed successfully.`);
           
           const isMathOrText = data.data?.problem_type === "math" || data.data?.problem_type === "text" || data.data?.problem_type === "unknown";
           setIsQuestion(isMathOrText);
@@ -901,11 +955,12 @@ export default function CameraScanner({
             box: { ymin: 0, xmin: 0, ymax: 100, xmax: 100 }
           }];
 
+          setDetectedQuestions(resolvedQuestions);
+          
           if (resolvedQuestions.length === 1) {
             const singleQuestionText = resolvedQuestions[0].text;
             setExtractedResult(singleQuestionText);
             setSelectedQuestionIds([resolvedQuestions[0].id]);
-            setDetectedQuestions(resolvedQuestions);
 
             // Store to scan history automatically
             saveScanToHistory({
@@ -915,14 +970,8 @@ export default function CameraScanner({
               confidence: confidenceVal >= 0.70 ? "high" : "low",
               timestamp: Date.now(),
             });
-
-            // Send output back to Solviora Solver Input and solve immediately
-            onTextScanned(singleQuestionText, true);
-            setIsOpen(false);
-            resetCaptured();
           } else {
             // Multiple questions detected!
-            setDetectedQuestions(resolvedQuestions);
             setSelectedQuestionIds([]); // Unselected by default so they can choose
             setExtractedResult(""); // Keep text area empty until they select
 
@@ -935,6 +984,9 @@ export default function CameraScanner({
               timestamp: Date.now(),
             });
           }
+
+          // Store in cache for future duplicate scans
+          ocrCacheRef.current[imageB64] = data;
 
           finalSuccess = true;
           break; // Break loop since we succeeded!
@@ -955,18 +1007,16 @@ export default function CameraScanner({
             1006: "Network timeout",
             1007: "API not configured",
             1008: "Invalid input",
-            
-            // New specific codes
             "NETWORK_TIMEOUT": "⚠️ The OCR request timed out. A connection timeout occurred. Please check your internet connection.",
-            "API_KEY_INVALID": "The server's Google Gemini API key is missing, unauthorized, or invalid. Please configure your API key in the Settings > Secrets menu in AI Studio.",
-            "API_RATE_LIMIT": "The Gemini API request limit has been exceeded. Please wait a few moments and try your camera scan again.",
-            "IMAGE_DECODE_FAILED": "The image data is corrupted, malformed, or of an unsupported format. Please retry capturing or upload another image.",
-            "GEMINI_UNAVAILABLE": "The AI service is temporarily overloaded or unavailable. We are retrying the request...",
-            "OCR_PARSE_FAILED": "OCR scanning failed to extract structured question text. Please try taking a clearer picture.",
-            "SERVER_ERROR": "A server error occurred while processing the OCR request."
+            "API_KEY_INVALID": "The Google Gemini API key is missing or invalid. Please check the server secrets.",
+            "API_RATE_LIMIT": "Solviora is experiencing high demand. Please wait while we automatically retry.",
+            "IMAGE_DECODE_FAILED": "The image could not be parsed. Please make sure the photo is clear and try again.",
+            "GEMINI_UNAVAILABLE": "Solviora is experiencing high demand. Please wait while we automatically retry.",
+            "OCR_PARSE_FAILED": "The image could not be parsed. Please make sure the photo is clear and try again.",
+            "SERVER_ERROR": "Solviora is temporarily busy. Please try again in a minute."
           };
 
-          const friendlyError = serverMessage || errorMap[errCode] || errorMap[errType] || "Unsupported image format or corrupt input. Try another screenshot.";
+          const friendlyError = serverMessage || errorMap[errCode] || errorMap[errType] || "Solviora is temporarily busy. Please try again in a minute.";
 
           const isRetryable = 
             errCode === 1006 || 
@@ -1007,6 +1057,9 @@ export default function CameraScanner({
 
     // Process final outcome when all attempts exhausted
     setIsOcrProcessing(false);
+    if (activeOcrAbortControllerRef.current === ocrController) {
+      activeOcrAbortControllerRef.current = null;
+    }
 
     if (!finalSuccess) {
       // Extracted retries fully exhausted
@@ -1016,14 +1069,11 @@ export default function CameraScanner({
       let finalFriendlyMsg = rawErrorStr;
       if (rawErrorStr.includes("Failed to fetch") || rawErrorStr.includes("network") || rawErrorStr.includes("Network")) {
         finalFriendlyMsg = "⚠️ Network failure: A connection timeout occurred. Please check your internet connection.";
+      } else if (rawErrorStr.includes("API_RATE_LIMIT") || rawErrorStr.includes("rate limit") || rawErrorStr.includes("quota")) {
+        finalFriendlyMsg = "Solviora is temporarily busy. Please try again in a minute.";
       }
 
       setOcrError(finalFriendlyMsg);
-      setTechnicalErrorDetails(
-        fallbackText 
-          ? `[API Response Raw]: ${fallbackText.substring(0, 1000)}` 
-          : (lastErr?.stack || rawErrorStr)
-      );
     }
   };
 
@@ -1565,7 +1615,7 @@ export default function CameraScanner({
                               {ocrError}
                             </h4>
                             <p className="text-xs text-slate-400 leading-relaxed">
-                              Your device captured the image correctly, but the Solviora OCR engine was blocked from parsing the text. Review the technical details log below.
+                              Your device captured the image correctly, but the Solviora OCR engine was temporarily blocked or unable to parse the text.
                             </p>
                           </div>
                         </div>
@@ -1605,30 +1655,6 @@ export default function CameraScanner({
                             <span>📷 New Scan</span>
                           </button>
                         </div>
-
-                        {/* REQUIREMENT 3: EXPANDABLE VIEW TECHNICAL DETAILS SECTION FOR DEVELOPERS */}
-                        {technicalErrorDetails && (
-                          <div className="border-t border-rose-950/20 pt-3">
-                            <button
-                              type="button"
-                              onClick={() => setIsDeveloperDetailsExp(!isDeveloperDetailsExp)}
-                              className="text-[9px] font-mono uppercase font-black text-rose-400/70 hover:text-rose-300 flex items-center gap-1 transition select-none"
-                            >
-                              <span>View Technical Details (Debug Log)</span>
-                              {isDeveloperDetailsExp ? (
-                                <ChevronUp className="w-3 h-3" />
-                              ) : (
-                                <ChevronDown className="w-3 h-3" />
-                              )}
-                            </button>
-
-                            {isDeveloperDetailsExp && (
-                              <div className="mt-2 p-3 rounded-xl bg-black border border-slate-850 text-[10px] font-mono text-slate-400 overflow-x-auto max-h-[120px] scrollbar-thin">
-                                {technicalErrorDetails}
-                              </div>
-                            )}
-                          </div>
-                        )}
                       </div>
 
                     ) : (

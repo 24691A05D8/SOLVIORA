@@ -77,7 +77,7 @@ function getGeminiClient(): GoogleGenAI {
 }
 
 /**
- * Helper to determine if an error is a transient 503 / UNAVAILABLE error.
+ * Helper to determine if an error is a transient 503 / UNAVAILABLE error or rate limit.
  */
 function isTransientError(error: any): boolean {
   if (!error) return false;
@@ -101,7 +101,10 @@ function isTransientError(error: any): boolean {
     errMsg.includes("429") ||
     errMsg.includes("quota") ||
     errMsg.includes("rate limit") ||
-    errMsg.includes("exhausted")
+    errMsg.includes("exhausted") ||
+    errMsg.includes("too many requests") ||
+    errMsg.includes("resource_exhausted") ||
+    errMsg.includes("api_rate_limit")
   ) {
     return true;
   }
@@ -135,7 +138,7 @@ const analyzeAndMapError = (error: any): { errorType: string; errorCode: string;
     return {
       errorType: "API_KEY_INVALID",
       errorCode: "API_KEY_INVALID",
-      message: "The server's Google Gemini API key is missing, unauthorized, or invalid. Please configure your API key in the Settings > Secrets menu in AI Studio."
+      message: "The Google Gemini API key is missing or invalid. Please check the server secrets."
     };
   }
 
@@ -145,12 +148,13 @@ const analyzeAndMapError = (error: any): { errorType: string; errorCode: string;
     errMsg.includes("rate limit") ||
     errMsg.includes("too many requests") ||
     errMsg.includes("exhausted") ||
-    errMsg.includes("api_rate_limit")
+    errMsg.includes("api_rate_limit") ||
+    errMsg.includes("resource_exhausted")
   ) {
     return {
       errorType: "API_RATE_LIMIT",
       errorCode: "API_RATE_LIMIT",
-      message: "The Gemini API request limit has been exceeded. Please wait a few moments and try your camera scan again."
+      message: "Solviora is experiencing high demand. Please wait while we automatically retry."
     };
   }
 
@@ -168,7 +172,7 @@ const analyzeAndMapError = (error: any): { errorType: string; errorCode: string;
     return {
       errorType: "NETWORK_TIMEOUT",
       errorCode: "NETWORK_TIMEOUT",
-      message: "The OCR parsing request timed out while communicating with the AI service. This can happen under high server load. Retrying..."
+      message: "Solviora is experiencing high demand. Please wait while we automatically retry."
     };
   }
 
@@ -183,7 +187,7 @@ const analyzeAndMapError = (error: any): { errorType: string; errorCode: string;
     return {
       errorType: "IMAGE_DECODE_FAILED",
       errorCode: "IMAGE_DECODE_FAILED",
-      message: "The image data is corrupted, malformed, or of an unsupported format. Please retry capturing or upload another image."
+      message: "The image could not be parsed. Please make sure the photo is clear and try again."
     };
   }
 
@@ -196,7 +200,7 @@ const analyzeAndMapError = (error: any): { errorType: string; errorCode: string;
     return {
       errorType: "GEMINI_UNAVAILABLE",
       errorCode: "GEMINI_UNAVAILABLE",
-      message: "The AI service is temporarily overloaded or unavailable. We are retrying the request..."
+      message: "Solviora is experiencing high demand. Please wait while we automatically retry."
     };
   }
 
@@ -209,7 +213,7 @@ const analyzeAndMapError = (error: any): { errorType: string; errorCode: string;
     return {
       errorType: "OCR_PARSE_FAILED",
       errorCode: "OCR_PARSE_FAILED",
-      message: "OCR scanning failed to extract structured question text. Please try taking a clearer picture."
+      message: "The image could not be parsed. Please make sure the photo is clear and try again."
     };
   }
 
@@ -217,7 +221,7 @@ const analyzeAndMapError = (error: any): { errorType: string; errorCode: string;
   return {
     errorType: "SERVER_ERROR",
     errorCode: "SERVER_ERROR",
-    message: "A server error occurred while processing the OCR request."
+    message: "Solviora is temporarily busy. Please try again in a minute."
   };
 };
 
@@ -465,12 +469,12 @@ FALLBACK AND CRITICAL ERROR RULES (If you fail or cannot parse):
     let geminiProcessingTime = 0;
 
     // Robust backend-side retries with exponential backoff on primary structured generation
-    const backoffTimes = [0, 1500, 3000]; // Multi-attempt retry delays
-    for (let attempt = 0; attempt < backoffTimes.length; attempt++) {
+    const backoffTimes = [2000, 4000, 8000]; // Multi-attempt retry delays (2s, 4s, 8s)
+    for (let attempt = 0; attempt <= backoffTimes.length; attempt++) {
       try {
         if (attempt > 0) {
-          const backoff = backoffTimes[attempt];
-          console.warn(`[Backend OCR Log] [Attempt ${attempt + 1}/${backoffTimes.length}] Transient error or socket timeout, sleeping ${backoff}ms before backoff retry...`);
+          const backoff = backoffTimes[attempt - 1];
+          console.warn(`[Backend OCR Log] [Attempt ${attempt + 1}/${backoffTimes.length + 1}] Transient error or socket timeout, sleeping ${backoff}ms before backoff retry...`);
           await sleep(backoff);
         }
 
@@ -497,14 +501,14 @@ FALLBACK AND CRITICAL ERROR RULES (If you fail or cannot parse):
         textOutput = response.text || "";
         isSuccessful = true;
         
-        console.info(`[Backend OCR Log] [Attempt ${attempt + 1}/${backoffTimes.length}] Call completed successfully. Latency: ${geminiLatency}s, Response character count: ${textOutput.length}`);
+        console.info(`[Backend OCR Log] [Attempt ${attempt + 1}/${backoffTimes.length + 1}] Call completed successfully. Latency: ${geminiLatency}s, Response character count: ${textOutput.length}`);
         
         // CHECKPOINT 4: Log the full response
         console.info(`[Backend Gemini Response Log] Response Payload: ${JSON.stringify(response, null, 2)}`);
         break; // Succeeded! Break retry loop
       } catch (err: any) {
         geminiApiError = err;
-        console.error(`[Backend OCR Log] [Attempt ${attempt + 1}/${backoffTimes.length}] Call failed. Error message: ${err?.message || err}`);
+        console.error(`[Backend OCR Log] [Attempt ${attempt + 1}/${backoffTimes.length + 1}] Call failed. Error message: ${err?.message || err}`);
         
         // Immediate termination if the error indicates a structural issue (unauthorized / invalid API key)
         const errMsgLower = String(err?.message || err).toLowerCase();
@@ -568,10 +572,7 @@ FALLBACK AND CRITICAL ERROR RULES (If you fail or cannot parse):
         
         // Map the original or fallback error to friendly output rather than hardcoded TIMEOUT
         const finalDiagnostic = analyzeAndMapError(geminiApiError || fallbackErr);
-        const isDev = process.env.NODE_ENV !== "production";
-        const messageToClient = isDev
-          ? `${finalDiagnostic.message}\n\n[Dev Diagnostics]\nError Code: ${finalDiagnostic.errorCode}\nStack: ${(geminiApiError || fallbackErr)?.stack || (geminiApiError || fallbackErr)?.message}`
-          : finalDiagnostic.message;
+        const messageToClient = finalDiagnostic.message;
 
         return res.json(buildOcrResponse({
           status: "error",
@@ -614,10 +615,7 @@ FALLBACK AND CRITICAL ERROR RULES (If you fail or cannot parse):
 
   } catch (error: any) {
     const diagnostic = analyzeAndMapError(error);
-    const isDev = process.env.NODE_ENV !== "production";
-    const messageToClient = isDev
-      ? `${diagnostic.message}\n\n[Dev Diagnostics]\nError Code: ${diagnostic.errorCode}\nStack: ${error?.stack || error?.message}`
-      : diagnostic.message;
+    const messageToClient = diagnostic.message;
 
     return res.json(buildOcrResponse({
       status: "error",
@@ -737,7 +735,7 @@ Question: ${question}`;
     };
 
     let response;
-    const explainBackoffTimes = [1500, 3000]; // Multi-stage backoff
+    const explainBackoffTimes = [2000, 4000, 8000]; // Multi-stage exponential backoff (2s, 4s, 8s)
     let explainSuccess = false;
     let explainError: any = null;
     let geminiProcessingTime = 0;
@@ -766,17 +764,10 @@ Question: ${question}`;
     }
 
     if (!explainSuccess || !response) {
-      const isQuota = String(explainError?.message || explainError).toLowerCase().includes("quota") || explainError?.status === 429;
-      if (isQuota) {
-        return res.status(429).json({
-          success: false,
-          error: "⚠️ You have exceeded the temporary rate limit. Please wait a few seconds before trying again.",
-        });
-      }
       const diagnostic = analyzeAndMapError(explainError);
       return res.status(explainError?.status || 500).json({
         success: false,
-        error: diagnostic.message || "An unexpected error occurred during the AI explanation process.",
+        error: diagnostic.message || "Solviora is temporarily busy. Please try again in a minute.",
       });
     }
 

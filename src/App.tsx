@@ -267,6 +267,7 @@ function renderExplanation(text: string, isDark: boolean): React.ReactNode {
 
 export default function App() {
   const [showSplash, setShowSplash] = useState<boolean>(true);
+  const activeExplainAbortControllerRef = useRef<AbortController | null>(null);
   
   // --- CONFIGURABLE UX STATES ---
   const [isDark, setIsDark] = useState<boolean>(true); // Defaults to gorgeous deep navy slate dark theme
