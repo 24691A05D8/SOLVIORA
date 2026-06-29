@@ -218,7 +218,58 @@ export default function CameraScanner({
     text: string;
     box: { ymin: number; xmin: number; ymax: number; xmax: number };
   }[]>([]);
-  const [selectedQuestionId, setSelectedQuestionId] = useState<string | null>(null);
+  const [selectedQuestionIds, setSelectedQuestionIds] = useState<string[]>([]);
+  const selectedQuestionId = selectedQuestionIds.length === 1 ? selectedQuestionIds[0] : null;
+
+  // Multi-select helper utilities
+  const updateExtractedText = (ids: string[], currentQuestions = detectedQuestions) => {
+    if (ids.length === 0) {
+      setExtractedResult("");
+      return;
+    }
+    
+    // Filter questions in their original order
+    const selectedQs = currentQuestions.filter((q) => ids.includes(q.id));
+    
+    if (selectedQs.length === 1) {
+      setExtractedResult(selectedQs[0].text);
+    } else {
+      const combined = selectedQs
+        .map((q, idx) => `[Question ${idx + 1}]:\n${q.text}`)
+        .join("\n\n");
+      setExtractedResult(combined);
+    }
+  };
+
+  const toggleQuestionSelection = (qId: string) => {
+    setSelectedQuestionIds((prev) => {
+      let next: string[];
+      if (prev.includes(qId)) {
+        next = prev.filter((id) => id !== qId);
+      } else {
+        next = [...prev, qId];
+      }
+
+      // Preserve original order on the page (top-to-bottom, left-to-right)
+      const orderedIds = detectedQuestions
+        .filter((q) => next.includes(q.id))
+        .map((q) => q.id);
+
+      updateExtractedText(orderedIds);
+      return orderedIds;
+    });
+  };
+
+  const handleSelectAll = () => {
+    const allIds = detectedQuestions.map((q) => q.id);
+    setSelectedQuestionIds(allIds);
+    updateExtractedText(allIds);
+  };
+
+  const handleClearSelection = () => {
+    setSelectedQuestionIds([]);
+    setExtractedResult("");
+  };
 
   // Error diagnostic modules
   const [technicalErrorDetails, setTechnicalErrorDetails] = useState<string | null>(null);
@@ -667,7 +718,7 @@ export default function CameraScanner({
     setTechnicalErrorDetails(null);
     setIsDeveloperDetailsExp(false);
     setDetectedQuestions([]);
-    setSelectedQuestionId(null);
+    setSelectedQuestionIds([]);
     if (activeTab === "camera") {
       startCamera();
     }
@@ -853,7 +904,7 @@ export default function CameraScanner({
           if (resolvedQuestions.length === 1) {
             const singleQuestionText = resolvedQuestions[0].text;
             setExtractedResult(singleQuestionText);
-            setSelectedQuestionId(resolvedQuestions[0].id);
+            setSelectedQuestionIds([resolvedQuestions[0].id]);
             setDetectedQuestions(resolvedQuestions);
 
             // Store to scan history automatically
@@ -872,7 +923,7 @@ export default function CameraScanner({
           } else {
             // Multiple questions detected!
             setDetectedQuestions(resolvedQuestions);
-            setSelectedQuestionId(null); // Unselected by default so they can choose
+            setSelectedQuestionIds([]); // Unselected by default so they can choose
             setExtractedResult(""); // Keep text area empty until they select
 
             // Store the overall text to history
@@ -1652,10 +1703,34 @@ export default function CameraScanner({
                           </label>
                           {detectedQuestions.length > 1 && (
                             <span className="text-[10px] text-[#818cf8] font-black bg-indigo-500/10 px-2 py-0.5 rounded-md border border-indigo-500/20 animate-pulse">
-                              🎯 Click to Select Question
+                              🎯 Click to Select Multiple
                             </span>
                           )}
                         </div>
+
+                        {detectedQuestions.length > 1 && (
+                          <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-xl border border-slate-800 bg-[#070c16] shadow-sm">
+                            <div className="text-xs font-bold text-slate-300">
+                              Selected Questions: <span className="text-indigo-400 font-extrabold">{selectedQuestionIds.length}</span> / {detectedQuestions.length}
+                            </div>
+                            <div className="flex gap-2">
+                              <button
+                                type="button"
+                                onClick={handleSelectAll}
+                                className="px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-wider rounded-lg bg-indigo-500/10 border border-indigo-500/30 text-indigo-400 hover:bg-indigo-500 hover:text-white transition cursor-pointer"
+                              >
+                                Select All
+                              </button>
+                              <button
+                                type="button"
+                                onClick={handleClearSelection}
+                                className="px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-wider rounded-lg bg-slate-800 border border-slate-750 text-slate-400 hover:text-rose-400 hover:border-rose-500/30 transition cursor-pointer"
+                              >
+                                Clear
+                              </button>
+                            </div>
+                          </div>
+                        )}
                         
                         <div className="border border-slate-850 rounded-2xl p-3 bg-[#0a101d] space-y-3 shadow-inner">
                           <div className="relative rounded-xl overflow-hidden border border-slate-800 flex items-center justify-center bg-black">
@@ -1667,15 +1742,12 @@ export default function CameraScanner({
                             
                             {/* Overlay Questions Boxes if multiple questions exist */}
                             {detectedQuestions.length > 1 && detectedQuestions.map((q, idx) => {
-                              const isSelected = selectedQuestionId === q.id;
+                              const isSelected = selectedQuestionIds.includes(q.id);
                               return (
                                 <button
                                   key={q.id}
                                   type="button"
-                                  onClick={() => {
-                                    setSelectedQuestionId(q.id);
-                                    setExtractedResult(q.text);
-                                  }}
+                                  onClick={() => toggleQuestionSelection(q.id)}
                                   className={`absolute transition-all duration-300 rounded-lg flex items-center justify-center group ${
                                     isSelected
                                       ? "border-2 border-indigo-500 bg-indigo-500/20 shadow-[0_0_15px_rgba(99,102,241,0.5)] z-20"
@@ -1687,7 +1759,7 @@ export default function CameraScanner({
                                     width: `${q.box.xmax - q.box.xmin}%`,
                                     height: `${q.box.ymax - q.box.ymin}%`,
                                   }}
-                                  title={`Select Question ${idx + 1}`}
+                                  title={`Toggle Question ${idx + 1}`}
                                 >
                                   {/* Visual numeric indicator badge on corner of box */}
                                   <span className={`absolute -top-2.5 -left-1 px-1.5 py-0.5 rounded text-[9px] font-black uppercase font-mono tracking-wider transition-all shadow ${
@@ -1805,7 +1877,7 @@ export default function CameraScanner({
                           className="py-3.5 px-4 rounded-xl font-black text-xs uppercase tracking-wide flex items-center justify-center gap-2 cursor-pointer transition-all border border-slate-800 bg-slate-900/60 text-slate-300 hover:text-white hover:bg-slate-800"
                         >
                           <FileText className="w-4 h-4 text-indigo-400" />
-                          <span>📋 Load to Input</span>
+                          <span>{detectedQuestions.length > 1 ? "📋 Load Selected" : "📋 Load to Input"}</span>
                         </button>
 
                         <button
@@ -1825,7 +1897,7 @@ export default function CameraScanner({
                         className="flex-1 py-3.5 px-5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-500 text-white font-black text-xs uppercase tracking-widest flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-emerald-500/10 hover:from-emerald-700 hover:to-teal-600 transition-all scale-100 hover:scale-[1.01]"
                       >
                         <Sparkles className="w-4 h-4 text-amber-300 animate-pulse" />
-                        <span>✨ Solve Immediately</span>
+                        <span>{detectedQuestions.length > 1 ? "✨ Solve Selected" : "✨ Solve Immediately"}</span>
                         <ChevronRight className="w-4 h-4" />
                       </button>
                     </div>

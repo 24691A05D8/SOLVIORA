@@ -29,7 +29,7 @@
  *    hundreds of miles away.
  */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { 
   Calculator, 
   Sparkles, 
@@ -57,58 +57,204 @@ import CameraScanner from "./components/CameraScanner";
 import ErrorBoundary from "./components/ErrorBoundary";
 
 // Custom parser to format explanation markdown elements to JSX nicely
-function renderExplanation(text: string, isDark: boolean) {
+function renderExplanation(text: string, isDark: boolean): React.ReactNode {
   if (!text) return null;
+  
+  // Parse text into structured blocks: heading, list, table, blockquote, paragraph, empty
   const lines = text.split("\n");
+  const blocks: Array<{
+    type: "heading" | "list" | "table" | "blockquote" | "paragraph" | "empty";
+    level?: number;
+    content: any; // string, string[], or string[][] for table
+  }> = [];
+
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      blocks.push({ type: "empty", content: "" });
+      i++;
+      continue;
+    }
+
+    // Blockquote / Highlight box
+    if (trimmed.startsWith(">")) {
+      const quoteLines: string[] = [];
+      while (i < lines.length && lines[i].trim().startsWith(">")) {
+        quoteLines.push(lines[i].trim().substring(1).trim());
+        i++;
+      }
+      blocks.push({ type: "blockquote", content: quoteLines.join("\n") });
+      continue;
+    }
+
+    // Table
+    if (trimmed.startsWith("|")) {
+      const tableRows: string[][] = [];
+      while (i < lines.length && lines[i].trim().startsWith("|")) {
+        const rowTrimmed = lines[i].trim();
+        // Extract cells, filtering out empty cells at start/end
+        const cells = rowTrimmed.split("|").map(c => c.trim()).filter((_, idx, arr) => idx > 0 && idx < arr.length - 1);
+        // Skip separator rows like |---|---|
+        if (!cells.every(cell => /^[-:\s]+$/.test(cell))) {
+          tableRows.push(cells);
+        }
+        i++;
+      }
+      if (tableRows.length > 0) {
+        blocks.push({ type: "table", content: tableRows });
+      }
+      continue;
+    }
+
+    // Bullet List
+    if (trimmed.startsWith("-") || trimmed.startsWith("*")) {
+      const listItems: string[] = [];
+      while (i < lines.length && (lines[i].trim().startsWith("-") || lines[i].trim().startsWith("*"))) {
+        const itemText = lines[i].trim().replace(/^[-*]\s*/, "");
+        listItems.push(itemText);
+        i++;
+      }
+      blocks.push({ type: "list", content: listItems });
+      continue;
+    }
+
+    // Heading
+    if (trimmed.startsWith("###")) {
+      blocks.push({ type: "heading", level: 3, content: trimmed.replace(/^###\s*/, "") });
+      i++;
+      continue;
+    }
+    if (trimmed.startsWith("##")) {
+      blocks.push({ type: "heading", level: 2, content: trimmed.replace(/^##\s*/, "") });
+      i++;
+      continue;
+    }
+    if (trimmed.startsWith("#")) {
+      blocks.push({ type: "heading", level: 1, content: trimmed.replace(/^#\s*/, "") });
+      i++;
+      continue;
+    }
+
+    // Default to paragraph
+    blocks.push({ type: "paragraph", content: line });
+    i++;
+  }
+
   return (
-    <div className="space-y-2 text-left">
-      {lines.map((line, idx) => {
-        const trimmed = line.trim();
-        if (!trimmed) {
-          return <div key={idx} className="h-1.5" />;
+    <div className="space-y-3.5 text-left font-sans">
+      {blocks.map((block, bIdx) => {
+        if (block.type === "empty") {
+          return <div key={bIdx} className="h-1" />;
         }
-        
-        // Match Markdown headings: e.g., "### Heading" or "## Heading"
-        if (trimmed.startsWith("###")) {
+
+        if (block.type === "heading") {
+          const contentStr = String(block.content);
+          const isFinalAnswer = contentStr.toLowerCase().includes("final answer") || contentStr.toLowerCase().includes("4. final answer");
+          if (block.level === 3) {
+            return (
+              <h5 key={bIdx} className={`text-[12px] font-extrabold uppercase tracking-wider mt-5 mb-2 flex items-center gap-1.5 border-b pb-1.5 ${
+                isFinalAnswer 
+                  ? "text-emerald-400 border-emerald-500/20" 
+                  : "text-indigo-400 border-indigo-500/10"
+              }`}>
+                <span className={`w-2 h-2 rounded-full ${isFinalAnswer ? "bg-emerald-500 animate-pulse" : "bg-indigo-500"}`}></span>
+                {contentStr}
+              </h5>
+            );
+          }
+          if (block.level === 2) {
+            return (
+              <h4 key={bIdx} className="text-xs font-extrabold uppercase text-indigo-400 mt-5 mb-2">
+                {contentStr}
+              </h4>
+            );
+          }
           return (
-            <h5 key={idx} className="text-[11px] font-black uppercase text-indigo-400 tracking-wider mt-4.5 mb-1.5 flex items-center gap-1.5 border-b border-indigo-500/10 pb-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>
-              {trimmed.replace(/^###\s*/, "")}
-            </h5>
-          );
-        }
-        if (trimmed.startsWith("##")) {
-          return (
-            <h4 key={idx} className="text-xs font-black uppercase text-indigo-400 mt-4.5 mb-1.5">
-              {trimmed.replace(/^##\s*/, "")}
-            </h4>
-          );
-        }
-        if (trimmed.startsWith("#")) {
-          return (
-            <h3 key={idx} className="text-sm font-black text-indigo-400 mt-5 mb-2">
-              {trimmed.replace(/^#\s*/, "")}
+            <h3 key={bIdx} className="text-sm font-black text-indigo-400 mt-6 mb-2.5">
+              {contentStr}
             </h3>
           );
         }
 
-        // Match list bullets: "- Bullet" or "* Bullet"
-        if (trimmed.startsWith("-") || trimmed.startsWith("*")) {
-          const content = trimmed.replace(/^[-*]\s*/, "");
+        if (block.type === "list") {
           return (
-            <div key={idx} className="flex items-start gap-2 pl-3 text-xs leading-relaxed mt-1">
-              <span className="text-indigo-500 font-extrabold select-none shrink-0">•</span>
-              <span className={`font-semibold ${isDark ? "text-slate-300" : "text-slate-600"}`}>
-                {content}
-              </span>
+            <div key={bIdx} className="space-y-1.5 my-2">
+              {block.content.map((item: string, itemIdx: number) => (
+                <div key={itemIdx} className="flex items-start gap-2 pl-3 text-xs leading-relaxed">
+                  <span className="text-indigo-400 font-extrabold select-none shrink-0 mt-0.5">•</span>
+                  <span className={`font-semibold ${isDark ? "text-slate-300" : "text-slate-600"}`}>
+                    {item}
+                  </span>
+                </div>
+              ))}
+            </div>
+          );
+        }
+
+        if (block.type === "blockquote") {
+          return (
+            <div key={bIdx} className={`p-4 rounded-xl border my-3 text-xs leading-relaxed font-semibold shadow-sm ${
+              isDark 
+                ? "bg-slate-900/60 border-slate-800/80 text-slate-200" 
+                : "bg-slate-50 border-slate-200 text-slate-700"
+            }`}>
+              {renderExplanation(block.content, isDark)}
+            </div>
+          );
+        }
+
+        if (block.type === "table") {
+          const rows = block.content as string[][];
+          if (rows.length === 0) return null;
+          const headers = rows[0];
+          const bodyRows = rows.slice(1);
+
+          return (
+            <div key={bIdx} className="overflow-x-auto my-3.5 rounded-xl border border-slate-850">
+              <table className="min-w-full text-xs text-left">
+                <thead>
+                  <tr className={isDark ? "bg-slate-900 text-indigo-400 border-b border-slate-800" : "bg-slate-100 text-indigo-800 border-b border-slate-200"}>
+                    {headers.map((h, hIdx) => (
+                      <th key={hIdx} className="px-3.5 py-2 font-bold uppercase tracking-wider">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/40">
+                  {bodyRows.map((row, rIdx) => (
+                    <tr key={rIdx} className={isDark ? "hover:bg-slate-900/30" : "hover:bg-slate-50"}>
+                      {row.map((cell, cIdx) => (
+                        <td key={cIdx} className={`px-3.5 py-2 font-medium ${isDark ? "text-slate-300" : "text-slate-600"}`}>{cell}</td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
+        }
+
+        // Check if paragraph contains highlighting or is a key final answer line
+        const contentStr = String(block.content);
+        const isAnswerPara = contentStr.trim().startsWith("✅") || contentStr.toLowerCase().includes("final answer:") || contentStr.toLowerCase().includes("final answer is");
+        if (isAnswerPara) {
+          return (
+            <div key={bIdx} className={`p-4 rounded-xl border-2 my-3 text-xs leading-relaxed font-bold shadow-md ${
+              isDark 
+                ? "bg-emerald-950/20 border-emerald-500/30 text-emerald-300" 
+                : "bg-emerald-50/80 border-emerald-500/20 text-emerald-800"
+            }`}>
+              {contentStr}
             </div>
           );
         }
 
         // Standard lines
         return (
-          <p key={idx} className={`text-xs leading-relaxed font-semibold ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
-            {line}
+          <p key={bIdx} className={`text-xs leading-relaxed font-semibold ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
+            {contentStr}
           </p>
         );
       })}
@@ -125,6 +271,7 @@ export default function App() {
 
   // --- CALCULATION INPUT & OUTPUT STATES ---
   const [expression, setExpression] = useState<string>("");
+  const [cursorPos, setCursorPos] = useState<number>(0);
   const [calcResult, setCalcResult] = useState<string>("");
   const [degMode, setDegMode] = useState<boolean>(true); // Degrees by default
   const [aiQuestion, setAiQuestion] = useState<string>("");
@@ -183,6 +330,76 @@ export default function App() {
     }
   }, []);
 
+  // --- KEYBOARD SUPPORT FOR THE CLASSIC CALCULATOR ---
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (activeTab !== "calculator") return;
+
+      const activeEl = document.activeElement;
+      if (
+        activeEl && (
+          activeEl.tagName === "INPUT" ||
+          activeEl.tagName === "TEXTAREA" ||
+          activeEl.getAttribute("contenteditable") === "true"
+        )
+      ) {
+        return;
+      }
+
+      if (e.key === "Backspace") {
+        e.preventDefault();
+        handleBackspace();
+      } else if (e.key === "Delete") {
+        e.preventDefault();
+        handleClear();
+      } else if (e.key === "Enter" || e.key === "=") {
+        e.preventDefault();
+        evaluateExpressionLocal();
+      } else if (e.key === "(") {
+        e.preventDefault();
+        insertAtCursor("(");
+      } else if (e.key === ")") {
+        e.preventDefault();
+        insertAtCursor(")");
+      } else if (/^[0-9]$/.test(e.key)) {
+        e.preventDefault();
+        insertAtCursor(e.key);
+      } else if (e.key === ".") {
+        e.preventDefault();
+        insertAtCursor(".");
+      } else if (e.key === "+") {
+        e.preventDefault();
+        insertAtCursor(" + ");
+      } else if (e.key === "-") {
+        e.preventDefault();
+        insertAtCursor(" - ");
+      } else if (e.key === "*") {
+        e.preventDefault();
+        insertAtCursor(" × ");
+      } else if (e.key === "/") {
+        e.preventDefault();
+        insertAtCursor(" ÷ ");
+      } else if (e.key === "%") {
+        e.preventDefault();
+        insertAtCursor("%");
+      } else if (e.key === "^") {
+        e.preventDefault();
+        insertAtCursor("^");
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        setCursorPos((prev) => Math.max(0, prev - 1));
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        setCursorPos((prev) => Math.min(expression.length, prev + 1));
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [activeTab, expression, cursorPos, degMode]);
+
   // Safe localStorage sync
   const saveToHistory = (newItem: CalculationItem) => {
     setHistoryList((prev) => {
@@ -206,21 +423,116 @@ export default function App() {
   };
 
   // --- CLASSIC CLIENT-SIDE MATHEMATICS ENGINE ---
+  const insertAtCursor = (val: string, cursorOffsetAfter?: number) => {
+    setExpression((prev) => {
+      const before = prev.slice(0, cursorPos);
+      const after = prev.slice(cursorPos);
+      const newExpr = before + val + after;
+      const offset = cursorOffsetAfter !== undefined ? cursorOffsetAfter : val.length;
+      setCursorPos(before.length + offset);
+      return newExpr;
+    });
+  };
+
   const handleCalcClick = (val: string) => {
-    setExpression((prev) => prev + val);
+    if (val === "sin" || val === "cos" || val === "tan" || val === "log" || val === "ln") {
+      insertAtCursor(`${val}()`, val.length + 1);
+    } else if (val === "√") {
+      insertAtCursor("√()", 2);
+    } else {
+      insertAtCursor(val);
+    }
   };
 
   const handleClear = () => {
     setExpression("");
     setCalcResult("");
+    setCursorPos(0);
   };
 
   const handleBackspace = () => {
-    setExpression((prev) => prev.slice(0, -1));
+    if (cursorPos === 0) return;
+    setExpression((prev) => {
+      const before = prev.slice(0, cursorPos - 1);
+      const after = prev.slice(cursorPos);
+      setCursorPos(before.length);
+      return before + after;
+    });
+  };
+
+  const validateExpression = (expr: string): string | null => {
+    const trimmed = expr.trim();
+    if (!trimmed) return null;
+
+    // 1. Unmatched parentheses check
+    let openCount = 0;
+    for (let i = 0; i < trimmed.length; i++) {
+      if (trimmed[i] === '(') {
+        openCount++;
+      } else if (trimmed[i] === ')') {
+        openCount--;
+        if (openCount < 0) {
+          return "Unmatched closing parenthesis ')'";
+        }
+      }
+    }
+    if (openCount > 0) {
+      return "Missing closing parenthesis ')'";
+    }
+
+    // 2. Incomplete scientific functions
+    const fnRegex = /\b(sin|cos|tan|log|ln|sqrt|√)(?!\()/;
+    if (fnRegex.test(trimmed)) {
+      return "Incomplete scientific function";
+    }
+
+    // Check for empty parentheses
+    if (/\b(sin|cos|tan|log|ln|sqrt|√)\s*\(\s*\)/i.test(trimmed)) {
+      return "Incomplete expression";
+    }
+
+    // 3. Incomplete expressions ending with operator
+    if (/[+\-*/÷×^]$/.test(trimmed)) {
+      return "Incomplete expression";
+    }
+
+    // 4. Consecutive operators
+    const normalized = trimmed
+      .replace(/×/g, "*")
+      .replace(/÷/g, "/")
+      .replace(/\^/g, "**");
+
+    if (/([+*/-]{2,})/.test(normalized)) {
+      const match = normalized.match(/([+*/-]{2,})/);
+      if (match) {
+        const seq = match[1];
+        const allowed = ["**", "*-", "/-", "+-", "--", "**-"];
+        if (!allowed.includes(seq)) {
+          return "Invalid mathematical syntax";
+        }
+      }
+    }
+
+    // 5. Invalid decimals like 5.5.5
+    const parts = normalized.split(/[^0-9.]/);
+    for (const part of parts) {
+      if (part.split('.').length > 2) {
+        return "Invalid mathematical syntax";
+      }
+    }
+
+    return null;
   };
 
   const evaluateExpressionLocal = () => {
     if (!expression) return;
+
+    const validationError = validateExpression(expression);
+    if (validationError) {
+      setCalcResult(validationError);
+      return;
+    }
+
     try {
       let sanitized = expression
         .replace(/×/g, "*")
@@ -238,7 +550,7 @@ export default function App() {
 
       // Check for strictly sanctioned characters to keep sandbox and eval safe
       if (!/^[a-zA-Z0-9+\-*/%.()\s^]+$/.test(sanitized)) {
-        setCalcResult("Invalid Input");
+        setCalcResult("Invalid mathematical syntax");
         return;
       }
 
@@ -270,7 +582,7 @@ export default function App() {
         timestamp: Date.now(),
       });
     } catch (err) {
-      setCalcResult("Parse Error");
+      setCalcResult("Invalid mathematical syntax");
     }
   };
 
@@ -419,6 +731,7 @@ export default function App() {
   const loadHistoryItem = (item: CalculationItem) => {
     if (item.type === "standard") {
       setExpression(item.input);
+      setCursorPos(item.input.length);
       setCalcResult(item.result);
       setActiveTab("calculator");
     } else {
@@ -993,8 +1306,19 @@ export default function App() {
                 }`} id="premium-calc-screen">
                   
                   {/* Expression typing stream */}
-                  <div className="text-slate-400 text-xs font-mono font-bold tracking-wide break-all h-6">
-                    {expression || "0"}
+                  <div className="text-slate-400 text-xs font-mono font-bold tracking-wide break-all h-6 select-all flex items-center justify-end">
+                    {expression ? (
+                      <>
+                        <span>{expression.slice(0, cursorPos)}</span>
+                        <span className="animate-pulse text-indigo-500 font-extrabold mx-[1px]" style={{ animationDuration: '1s' }}>|</span>
+                        <span>{expression.slice(cursorPos)}</span>
+                      </>
+                    ) : (
+                      <span className="relative flex items-center justify-end">
+                        <span className="animate-pulse text-indigo-500 font-extrabold mr-[1px]" style={{ animationDuration: '1s' }}>|</span>
+                        <span className="opacity-40">0</span>
+                      </span>
+                    )}
                   </div>
                   
                   {/* Evaluation Result */}
@@ -1021,14 +1345,17 @@ export default function App() {
                       MODE: {degMode ? "DEG º" : "RAD ᶜ"}
                     </button>
                   </div>
-                  <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+                  <div className="grid grid-cols-3 sm:grid-cols-9 gap-2">
                     {[
-                      { label: "sin", func: "sin(" },
-                      { label: "cos", func: "cos(" },
-                      { label: "tan", func: "tan(" },
-                      { label: "log", func: "log(" },
-                      { label: "ln", func: "ln(" },
+                      { label: "sin", func: "sin" },
+                      { label: "cos", func: "cos" },
+                      { label: "tan", func: "tan" },
+                      { label: "log", func: "log" },
+                      { label: "ln", func: "ln" },
+                      { label: "√", func: "√" },
                       { label: "xʸ", func: "^" },
+                      { label: "(", func: "(" },
+                      { label: ")", func: ")" },
                     ].map((btn) => (
                       <button
                         key={btn.label}
@@ -1056,14 +1383,14 @@ export default function App() {
                     Clear
                   </button>
                   <button
-                    onClick={() => handleCalcClick("√")}
-                    className={`h-14 rounded-2xl font-black text-sm transition-all shadow-sm hover:scale-[1.01] active:scale-[0.98] cursor-pointer ${
+                    onClick={handleBackspace}
+                    className={`h-14 rounded-2xl font-black text-base transition-all shadow-sm hover:scale-[1.01] active:scale-[0.98] cursor-pointer ${
                       isDark ? 'bg-slate-800 text-indigo-400 hover:bg-slate-750' : 'bg-slate-100 text-indigo-700 hover:bg-slate-200'
                     }`}
-                    id="premium-key-sqrt"
-                    title="Square Root"
+                    id="premium-key-backspace"
+                    title="Backspace"
                   >
-                    √
+                    ⌫
                   </button>
                   <button
                     onClick={() => handleCalcClick("%")}
