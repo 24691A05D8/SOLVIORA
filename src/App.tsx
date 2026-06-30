@@ -637,6 +637,14 @@ export default function App() {
     }
     await new Promise((r) => setTimeout(r, 450));
 
+    // Cancel duplicate/previous ongoing explain requests to prevent concurrent state collisions
+    if (activeExplainAbortControllerRef.current) {
+      console.warn("[AI Client Log] Aborting previous pending explain request to prevent overlapping state...");
+      activeExplainAbortControllerRef.current.abort();
+    }
+    const explainController = new AbortController();
+    activeExplainAbortControllerRef.current = explainController;
+
     const maxRetries = 3;
     const retryDelays = [1000, 2000, 3000]; // 1s, 2s, 3s backoff delays as requested
     let success = false;
@@ -651,11 +659,19 @@ export default function App() {
         await new Promise((r) => setTimeout(r, delayMs));
       }
 
+      // Ensure we haven't been aborted while waiting for delay
+      if (explainController.signal.aborted) {
+        break;
+      }
+
       // Establish a strict 12-second client-side timeout using AbortController (as requested: 10-15 seconds)
       const controller = new AbortController();
       const timeoutId = setTimeout(() => {
         controller.abort();
       }, 12000); // 12 seconds timeout
+
+      const onGlobalAbort = () => controller.abort();
+      explainController.signal.addEventListener("abort", onGlobalAbort);
 
       try {
         console.info(`[AI Client Log] Dispatching request to /api/explain. Attempt ${attempt + 1}/${maxRetries + 1}`);
@@ -669,6 +685,7 @@ export default function App() {
         });
 
         clearTimeout(timeoutId);
+        explainController.signal.removeEventListener("abort", onGlobalAbort);
 
         // Detect and handle various categories of error statuses
         if (!response.ok) {
@@ -732,6 +749,7 @@ export default function App() {
         }
       } catch (err: any) {
         clearTimeout(timeoutId);
+        explainController.signal.removeEventListener("abort", onGlobalAbort);
         const isTimeout = err.name === "AbortError" || String(err?.message || err).toLowerCase().includes("timeout");
         console.error(`[AI Solviora Solver] Attempt ${attempt + 1}/${maxRetries + 1} failed:`, err);
 
@@ -755,6 +773,10 @@ export default function App() {
           setRetryAttempt(0);
         }
       }
+    }
+
+    if (activeExplainAbortControllerRef.current === explainController) {
+      activeExplainAbortControllerRef.current = null;
     }
 
     setIsLoading(false);
